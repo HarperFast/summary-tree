@@ -1,0 +1,24 @@
+{
+  "name": "summary-tree",
+  "version": "0.1.0",
+  "description": "RAPTOR-style hierarchical summary-tree retrieval as a Harper application (reference implementation for HarperFast/harper#1244)",
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "test": "node --test 'test/*.test.js'"
+  },
+  "keywords": [
+    "harper",
+    "harperdb",
+    "rag",
+    "retrieval",
+    "raptor",
+    "hnsw",
+    "vector-search",
+    "embeddings"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HarperFast/summary-tree.git"
+  }
+}

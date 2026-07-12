@@ -1,0 +1,54 @@
+# Summary-tree reference schema (harper#1244 Thread B).
+#
+# Two-table design: the pre-gate showed separate Chunk/Summary tables with an
+# app-side distance merge is metric-for-metric identical to a single shared
+# table, so the tree is purely additive — Chunk stays a normal content table.
+#
+# The `embedding` columns use @embed: Harper embeds `text` on every write with
+# the configured embedding model and maintains the HNSW index automatically.
+# Summaries inserted by the build loop are indexed with no extra code.
+
+type Chunk @table @export {
+	id: ID @primaryKey
+	text: String
+	# source document/uri this chunk came from — the locality key that makes
+	# incremental maintenance cheap (edits to one source touch few clusters)
+	source: String @indexed
+	title: String
+	embedding: [Float] @embed(source: "text", model: "embedder")
+	# leaf assignment into the tree; set by the build loop, not the writer
+	summaryId: String @indexed
+	summary: Summary @relationship(from: "summaryId")
+	updatedAt: Date @updatedTime
+}
+
+# Single-row operational state: build bookkeeping + a maintenance-leader lease
+# (Harper has no scheduler primitive yet — see README "frictions" — so one
+# worker self-elects via this lease and runs the periodic pass).
+type TreeState @table {
+	id: ID @primaryKey
+	builtChunkCount: Int
+	builtAt: Date
+	leaseHolder: String
+	leaseUntil: Float
+}
+
+type Summary @table @export {
+	id: ID @primaryKey
+	text: String # LLM-generated: "<title>\n\n<summary prose>"
+	title: String
+	level: Int @indexed # 1 = summarizes chunks, 2 = summarizes level-1 summaries, ...
+	embedding: [Float] @embed(source: "text", model: "embedder")
+	parentId: String @indexed
+	parent: Summary @relationship(from: "parentId")
+	members: [Chunk] @relationship(to: "summaryId")
+	# spherical-kmeans centroid of member embeddings; the incremental-assignment
+	# anchor for new/updated chunks. Plain attribute — deliberately NOT indexed.
+	centroid: [Float]
+	memberCount: Int
+	# incremental maintenance bookkeeping: how many member changes accumulated
+	# since the last (re-)summarization, and when that happened
+	dirtyCount: Int @indexed
+	summarizedAt: Date
+	updatedAt: Date @updatedTime
+}

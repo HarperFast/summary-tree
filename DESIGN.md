@@ -13,8 +13,8 @@ cost and endpoints are in [README.md](README.md).
   rows, all through the sink's `context` in the `memory` database, so they commit or roll back with the memory. No
   model call, no node read.
 - **Member rows are written under their node-scoped record lock** (`lockRow`) by the sink, the startup walk and the
-  runner's leaf assignment. The walk applies a scanned row only when it is newer than the stored member, so a walk
-  that read revision N cannot overwrite a sink's N+1. The sink takes this lock after agent-memory's `Memory` locks;
+  runner's leaf assignment. The walk skips a scanned row recorded at a later revision, or at the same revision in
+  the same state (two nodes can write one revision), so a walk that read revision N cannot overwrite a sink's N+1. The sink takes this lock after agent-memory's `Memory` locks;
   no member-row writer holds a `Memory` lock, so there is no cycle.
 - **A member row keeps its `partition`, `status` and `flagged` after the memory becomes ineligible**: a later change
   needs them to know which partition to revoke.

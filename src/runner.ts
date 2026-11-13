@@ -37,7 +37,6 @@ async function collect<T>(iterable: AsyncIterable<T> | Iterable<T> | Promise<Asy
 	return rows;
 }
 
-/** Debounced, dirty-only maintenance of every partition's tree, run by one leaseholder at a time. */
 export class Runner {
 	settings: Settings;
 	readonly holderId = `${hostname()}:${process.pid}:${threadId}:${randomUUID().slice(0, 8)}`;
@@ -71,6 +70,7 @@ export class Runner {
 
 	stop(): void {
 		this.#stopped = true;
+		this.#ready = false;
 		clearTimeout(this.#timer);
 		clearTimeout(this.#expiryTimer);
 		this.#closeSubscription();
@@ -97,6 +97,7 @@ export class Runner {
 	}
 
 	async #catchUp(retryMs = 1_000): Promise<void> {
+		if (this.#stopped) return;
 		try {
 			for await (const row of agentMemory.scanMemories({ includeInactive: true })) {
 				if (this.#stopped) return;
@@ -203,7 +204,7 @@ export class Runner {
 		);
 		if (!next?.validUntil || this.#stopped) return;
 		const delay = Math.min(MAX_TIMER_MS, Math.max(0, new Date(next.validUntil).getTime() - Date.now()) + 1_000);
-		this.#expiryTimer = setTimeout(() => void this.tick(), delay);
+		this.#expiryTimer = setTimeout(() => this.schedule(0), delay);
 		this.#expiryTimer.unref?.();
 	}
 
@@ -237,16 +238,22 @@ export class Runner {
 		await this.#acquireLease(true);
 	}
 
-	/** Inside a publish transaction: fails unless this worker still holds the lease, under the runner lock. */
+	/**
+	 * Inside a publish transaction: fails unless this worker still holds the lease. It renews the lease through the
+	 * runner lock, so the commit is refused if that lock expired before it, and a successor cannot have taken over.
+	 */
 	async #assertLease(txn: object): Promise<void> {
+		const { SummaryState } = summaryTables();
 		await lockRunner(txn);
-		const state = await summaryTables().SummaryState.get(RUNNER_ID, txn);
+		const state = await SummaryState.get(RUNNER_ID, txn);
 		if (state?.leaseHolder !== this.holderId || !(state.leaseUntil > Date.now())) throw new LeaseLostError();
+		await SummaryState.put({ ...state, leaseUntil: Date.now() + this.settings.leaseMs }, txn);
 	}
 
 	async #releaseLease(): Promise<void> {
 		const { SummaryState } = summaryTables();
 		await transaction(async (txn: object) => {
+			await lockRunner(txn);
 			const state = await SummaryState.get(RUNNER_ID, txn);
 			if (state?.leaseHolder === this.holderId) await SummaryState.put({ ...state, leaseUntil: 0 }, txn);
 		});
@@ -297,18 +304,21 @@ export class Runner {
 		// A memory that changed after its member row was written has its own pending change, not in `changes`: it is
 		// left out of this pass, and the next pass picks it up.
 		const recorded = new Map<string, number>(rows.filter((row) => row.eligible).map((row) => [row.id, row.revision]));
-		const current = await agentMemory.getMemories([...recorded.keys()]);
-		const eligible = current.filter(
-			(memory) =>
-				isEligible(memory, now) &&
-				partitionId(partitionLabels(memory.scopes)) === partition &&
-				memory.revision === recorded.get(memory.id as string),
+		const storedLeaf = new Map<string, string | null>(rows.map((row) => [row.id, row.leafId ?? null]));
+		const current = (await agentMemory.getMemories([...recorded.keys()])).filter(
+			(memory) => isEligible(memory, now) && partitionId(partitionLabels(memory.scopes)) === partition,
 		);
+		// A revision the member row did not have when read was committed since, with its member row: re-read that.
+		for (const memory of current) {
+			if (memory.revision === recorded.get(memory.id as string)) continue;
+			const stored = await SummaryMember.get(memory.id);
+			if (stored?.eligible && stored.partition === partition) recorded.set(memory.id as string, stored.revision);
+		}
+		const eligible = current.filter((memory) => memory.revision === recorded.get(memory.id as string));
 		const textOf = new Map<string, string>(
 			eligible.map((memory) => [memory.id as string, memberText(memory, settings.memberChars)]),
 		);
 		const vectors = await this.#vectorsOf(eligible, textOf);
-		const storedLeaf = new Map<string, string | null>(rows.map((row) => [row.id, row.leafId ?? null]));
 		const members: PlanMember[] = eligible.map((memory) => ({
 			id: memory.id as string,
 			revision: memory.revision as number,
@@ -331,7 +341,8 @@ export class Runner {
 				sourceIds: node.sourceIds ?? [],
 				summary: node.summary ?? null,
 			})),
-			clusteredSize: meta?.clusteredSize ?? null,
+			// centroids from another embedding model are in another vector space
+			clusteredSize: meta?.embeddingModel === settings.embeddingModel ? (meta?.clusteredSize ?? null) : null,
 			revoked,
 			current: new Set(members.map(memberRef)),
 			settings,
@@ -356,6 +367,7 @@ export class Runner {
 					maxTokens: settings.maxSummaryTokens,
 					maxInputChars,
 				});
+				if (this.#stopped) throw new LeaseLostError();
 				content = {
 					title,
 					summary,
@@ -394,17 +406,22 @@ export class Runner {
 			for (const id of plan.deleteIds) await SummaryNode.delete(id, txn);
 			if (written.size) {
 				await SummaryPartition.put(
-					{ id: partition, labels, clusteredSize: plan.clusteredSize, clusteredAt: new Date() },
+					{
+						id: partition,
+						labels,
+						clusteredSize: plan.clusteredSize,
+						embeddingModel: settings.embeddingModel,
+						clusteredAt: new Date(),
+					},
 					txn,
 				);
 			} else if (meta) {
 				await SummaryPartition.delete(partition, txn);
 			}
-			for (const change of changes) await SummaryChange.delete(change.id, txn);
 		});
 
-		// Leaf assignments only steer annotations and the next incremental pass, so they follow the publish, one member
-		// lock per transaction like every other writer except the sink.
+		// One member lock per transaction, like every writer but the sink. The changes are deleted only after these, so
+		// a crash in between leaves them for the next pass, which repeats the assignments without new model calls.
 		const updates = [...plan.leafOf.entries()]
 			.filter(([id, leafId]) => storedLeaf.get(id) !== leafId)
 			.map(([id, leafId]) => ({ id, leafId, expire: false }))
@@ -423,6 +440,11 @@ export class Runner {
 				);
 			});
 		}
+
+		await transaction(async (txn: object) => {
+			await this.#assertLease(txn);
+			for (const change of changes) await SummaryChange.delete(change.id, txn);
+		});
 	}
 
 	/** agent-memory's stored vectors when they come from this plugin's embedding model; others are embedded once. */
@@ -435,7 +457,7 @@ export class Runner {
 		for (const memory of memories) {
 			const id = memory.id as string;
 			const embedding = memory.embedding as readonly number[] | undefined;
-			const key = `${id}@${memory.revision}`;
+			const key = `${this.settings.embeddingModel}\0${id}@${memory.revision}`;
 			const cached = this.#vectorCache.get(key);
 			if (memory.embeddingModel === this.settings.embeddingModel && embedding?.length) vectors.set(id, embedding);
 			else if (cached) vectors.set(id, cached);

@@ -6,7 +6,7 @@ import { cp, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
-import { startHarper, teardownHarper, type ContextWithHarper } from '@harperfast/integration-testing';
+import { killHarper, startHarper, teardownHarper, type ContextWithHarper } from '@harperfast/integration-testing';
 
 const require = createRequire(import.meta.url);
 const PASSWORD = 'Summary-test-1!';
@@ -307,7 +307,6 @@ suite('summary-tree over agent-memory running as a separate app', (ctx: ContextW
 
 		const withdrawn = await call('admin', 'DELETE', `Memory/${ids[tag]}?reason=test`, undefined, { 'If-Match': '*' });
 		strictEqual(withdrawn.status, 200, JSON.stringify(withdrawn.body));
-		// before the debounced rebuild: the barrier written in the withdraw transaction hides the whole partition
 		const immediately = text(await orientation('bob'));
 		ok(!/walrus/.test(immediately), immediately);
 
@@ -336,5 +335,84 @@ suite('summary-tree over agent-memory running as a separate app', (ctx: ContextW
 		await until('acme to be rebuilt with the moved memory', async () =>
 			/sso/.test(text(await orientation('bob'))) ? true : undefined,
 		);
+	});
+});
+
+suite('summary-tree installed after memories already exist', (ctx: ContextWithHarper) => {
+	const harperOptions = () => ({
+		harperBinPath:
+			process.env.HARPER_INTEGRATION_TEST_INSTALL_SCRIPT ??
+			join(dirname(require.resolve('harper')), 'bin', 'harper.js'),
+		config: { threads: { count: 1 }, logging: { stdStreams: true }, authentication: { authorizeLocal: false } },
+	});
+	const admin = () =>
+		'Basic ' + Buffer.from(`${ctx.harper.admin.username}:${ctx.harper.admin.password}`).toString('base64');
+	const call = async (method: string, path: string, body?: unknown, headers?: Record<string, string>) => {
+		const response = await fetch(`${ctx.harper.httpURL}/${path}`, {
+			method,
+			headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: admin(), ...headers },
+			body: body === undefined ? undefined : JSON.stringify(body),
+		});
+		const text = await response.text();
+		return { status: response.status, body: text ? JSON.parse(text) : undefined };
+	};
+
+	before(async () => {
+		const dataRootDir = await mkdtemp(
+			join(process.env.HARPER_INTEGRATION_TEST_INSTALL_PARENT_DIR || tmpdir(), 'harper-integration-test-'),
+		);
+		await cp(
+			join(import.meta.dirname, 'fixtures', 'memory-service'),
+			join(dataRootDir, 'components', 'memory-service'),
+			{
+				recursive: true,
+				dereference: true,
+			},
+		);
+		(ctx as any).harper = { dataRootDir };
+		await startHarper(ctx, harperOptions());
+	});
+
+	after(async () => {
+		await teardownHarper(ctx);
+	});
+
+	test('the startup walk summarizes existing memories and leaves out ones withdrawn before it ran', async () => {
+		for (let i = 0; i < 5; i++) {
+			const response = await call('PUT', `Memory/${memId(`walk${i}`)}`, {
+				title: `heron note ${i}`,
+				content: i === 4 ? 'heron marsh flamingo secret' : `heron marsh survey ${i}`,
+				scopes: ['global'],
+			});
+			strictEqual(response.status, 201, JSON.stringify(response.body));
+		}
+		const withdrawn = await call('DELETE', `Memory/${memId('walk4')}?reason=test`, undefined, { 'If-Match': '*' });
+		strictEqual(withdrawn.status, 200, JSON.stringify(withdrawn.body));
+
+		await killHarper(ctx);
+		await cp(
+			join(import.meta.dirname, 'fixtures', 'summary-app'),
+			join(ctx.harper.dataRootDir, 'components', 'summary-app'),
+			{
+				recursive: true,
+				dereference: true,
+			},
+		);
+		await startHarper(ctx, harperOptions());
+
+		const deadline = Date.now() + 60_000;
+		let nodes: any[] = [];
+		while (Date.now() < deadline) {
+			const response = await call('GET', 'SummaryTree/');
+			if (response.status === 200 && !response.body.pending && response.body.nodes.length) {
+				nodes = response.body.nodes;
+				break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 250));
+		}
+		strictEqual(nodes.length, 1, 'one flat summary for the four live memories');
+		strictEqual(nodes[0].memberCount, 4);
+		ok(/heron/.test(nodes[0].summary), nodes[0].summary);
+		ok(!/flamingo/.test(nodes[0].summary), nodes[0].summary);
 	});
 });

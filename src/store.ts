@@ -32,11 +32,7 @@ export interface RecordOptions {
 	onlyIfNewer?: boolean;
 }
 
-/**
- * Records one memory change in `context`'s transaction: its member row (partition, leaf, revision, eligibility; never
- * memory text) and work for the partitions it left or joined. Makes no model call. Shared by the sink and the startup
- * walk.
- */
+/** Makes no model call: the sink runs it inside agent-memory's lifecycle transaction. */
 export async function recordMemory(
 	memory: Record<string, unknown>,
 	context: object,
@@ -56,11 +52,13 @@ export async function recordMemory(
 	if (options.onlyIfNewer && previous) {
 		const stored = previous.revision ?? 0;
 		// Writes on two nodes can share a revision, so an equal revision counts as recorded only in the same state.
+		const validUntil = eligible && memory.validUntil ? new Date(memory.validUntil as string).getTime() : null;
 		const same =
 			previous.partition === partition &&
 			previous.status === status &&
 			Boolean(previous.flagged) === flagged &&
-			Boolean(previous.eligible) === eligible;
+			Boolean(previous.eligible) === eligible &&
+			(previous.validUntil ? new Date(previous.validUntil).getTime() : null) === validUntil;
 		if (stored > revision || (stored === revision && same)) return false;
 	}
 	const revoke = revokesFrom(previous ?? undefined, memory, partition);

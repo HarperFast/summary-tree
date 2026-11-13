@@ -35,7 +35,6 @@ async function answer(context: any, target: { id?: string }): Promise<unknown> {
 	return expandNode(principal, target.id);
 }
 
-/** `GET <urlPath>/` lists readable top nodes; `GET <urlPath>/<id>` opens one node. */
 export class SummaryTreeResource extends BaseResource {
 	static hidden = true;
 	static loadAsInstance = false;

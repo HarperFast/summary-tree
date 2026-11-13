@@ -48,6 +48,7 @@ type SummaryPartition @table(database: "memory") {
 	id: ID @primaryKey
 	labels: [String]
 	clusteredSize: Int
+	embeddingModel: String
 	clusteredAt: Date
 }
 

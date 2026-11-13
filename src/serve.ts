@@ -23,22 +23,48 @@ async function collect<T = any>(iterable: any): Promise<T[]> {
 	return rows;
 }
 
-/** Partitions hidden by a pending revoking change: a member left, was withdrawn or flagged since the last rebuild. */
-export async function blockedPartitions(): Promise<Set<string>> {
-	const { SummaryChange } = summaryTables();
-	const rows = await collect(
-		SummaryChange.search({ conditions: [{ attribute: 'revoke', value: true }], select: ['partition'] }),
-	);
-	return new Set(rows.map((row) => row.partition));
+/**
+ * Whether a pending revoking change hides a partition: a member left, was withdrawn or flagged since the last
+ * rebuild. One indexed lookup per partition a request touches, memoized for that request.
+ */
+export class Barriers {
+	#blocked = new Map<string, Promise<boolean>>();
+
+	isBlocked(partition: string): Promise<boolean> {
+		let blocked = this.#blocked.get(partition);
+		if (blocked === undefined) {
+			const { SummaryChange } = summaryTables();
+			blocked = collect(
+				SummaryChange.search({
+					conditions: [
+						{ attribute: 'partition', value: partition },
+						{ attribute: 'revoke', value: true },
+					],
+					select: ['id'],
+					limit: 1,
+				}),
+			).then((rows) => rows.length > 0);
+			this.#blocked.set(partition, blocked);
+		}
+		return blocked;
+	}
 }
 
 /**
  * A node a principal may see: every member it was built from carries exactly the node's labels, and withdrawn or
  * flagged members are never summarized, so the label test decides; a pending revocation hides the partition.
  */
-function servable(node: any, principal: Principal, blocked: ReadonlySet<string>): boolean {
-	return Boolean(node?.summary) && !blocked.has(node.partition) && agentMemory.canReadLabels(principal, node.labels);
+async function servable(node: any, principal: Principal, barriers: Barriers): Promise<boolean> {
+	if (!node?.summary || !agentMemory.canReadLabels(principal, node.labels)) return false;
+	return !(await barriers.isBlocked(node.partition));
 }
+
+async function filterServable(nodes: any[], principal: Principal, barriers: Barriers): Promise<any[]> {
+	const keep = await Promise.all(nodes.map((node) => servable(node, principal, barriers)));
+	return nodes.filter((_, index) => keep[index]);
+}
+
+const bySize = (a: any, b: any) => b.memberCount - a.memberCount || (a.id < b.id ? -1 : 1);
 
 export interface NodeView {
 	id: string;
@@ -60,21 +86,23 @@ function view(node: any): NodeView {
 	};
 }
 
-export async function readableTopNodes(principal: Principal, blocked?: ReadonlySet<string>): Promise<NodeView[]> {
+export async function readableTopNodes(principal: Principal, barriers = new Barriers()): Promise<NodeView[]> {
 	const { SummaryNode } = summaryTables();
-	blocked ??= await blockedPartitions();
 	const tops = await collect(SummaryNode.search({ conditions: [{ attribute: 'top', value: true }] }));
-	return tops
-		.filter((node) => servable(node, principal, blocked!))
-		.sort((a, b) => b.memberCount - a.memberCount || (a.id < b.id ? -1 : 1))
-		.map(view);
+	return (await filterServable(tops, principal, barriers)).sort(bySize).map(view);
 }
 
-/** Whether a partition the principal can read has changes the runner has not applied yet. */
+const PENDING_SCAN_LIMIT = 1000;
+
+/**
+ * Whether a partition the principal can read has changes the runner has not applied yet. A backlog larger than the
+ * scan limit reports pending without reading it all.
+ */
 export async function hasPendingWork(principal: Principal): Promise<boolean> {
 	const { SummaryChange } = summaryTables();
-	for await (const change of await SummaryChange.search({ select: ['labels'] })) {
-		if (agentMemory.canReadLabels(principal, change.labels)) return true;
+	let scanned = 0;
+	for await (const change of await SummaryChange.search({ select: ['labels'], limit: PENDING_SCAN_LIMIT + 1 })) {
+		if (++scanned > PENDING_SCAN_LIMIT || agentMemory.canReadLabels(principal, change.labels)) return true;
 	}
 	return false;
 }
@@ -94,10 +122,10 @@ const MAX_ORIENTATION_ITEMS = 64;
  */
 export async function orientation(principal: Principal, budgetChars: number) {
 	const { SummaryNode } = summaryTables();
-	const blocked = await blockedPartitions();
+	const barriers = new Barriers();
 	const items: { title: string; content: string }[] = [];
 	let remaining = budgetChars;
-	let level: NodeView[] = await readableTopNodes(principal, blocked);
+	let level: NodeView[] = await readableTopNodes(principal, barriers);
 	while (level.length && items.length < MAX_ORIENTATION_ITEMS) {
 		const next: any[] = [];
 		for (const node of level) {
@@ -109,10 +137,10 @@ export async function orientation(principal: Principal, budgetChars: number) {
 			remaining -= size;
 			if (node.level > 1) {
 				const children = await collect(SummaryNode.search({ conditions: [{ attribute: 'parentId', value: node.id }] }));
-				next.push(...children.filter((child) => servable(child, principal, blocked)));
+				next.push(...(await filterServable(children, principal, barriers)));
 			}
 		}
-		level = next.sort((a, b) => b.memberCount - a.memberCount || (a.id < b.id ? -1 : 1)).map(view);
+		level = next.sort(bySize).map(view);
 	}
 	return items;
 }
@@ -122,37 +150,31 @@ export async function annotateHits(
 	hits: readonly Readonly<Record<string, unknown>>[],
 ): Promise<Map<string, NodeView>> {
 	const { SummaryMember, SummaryNode } = summaryTables();
-	const blocked = await blockedPartitions();
+	const barriers = new Barriers();
 	const members = await Promise.all(hits.map((hit) => SummaryMember.get(hit.id as string)));
 	const leafIds = [...new Set(members.filter((member) => member?.eligible && member.leafId).map((m) => m.leafId))];
 	const leaves = new Map<string, any>(
 		await Promise.all(leafIds.map(async (id): Promise<[string, any]> => [id, await SummaryNode.get(id)])),
 	);
 	const annotations = new Map<string, NodeView>();
-	members.forEach((member, index) => {
-		if (!member?.eligible || !member.leafId) return;
+	for (const [index, member] of members.entries()) {
+		if (!member?.eligible || !member.leafId) continue;
 		const leaf = leaves.get(member.leafId);
-		if (leaf?.partition !== member.partition || !servable(leaf, principal, blocked)) return;
+		if (leaf?.partition !== member.partition || !(await servable(leaf, principal, barriers))) continue;
 		annotations.set(hits[index].id as string, view(leaf));
-	});
+	}
 	return annotations;
 }
 
-/** A node with its children (interior) or its member memories (leaf); 404 when missing or unreadable. */
 export async function expandNode(principal: Principal, id: string) {
 	const { SummaryMember, SummaryNode } = summaryTables();
-	const blocked = await blockedPartitions();
+	const barriers = new Barriers();
 	const node = await SummaryNode.get(id);
-	if (!servable(node, principal, blocked)) throw notFound();
+	if (!(await servable(node, principal, barriers))) throw notFound();
 	if (node.level > 1) {
 		const children = await collect(SummaryNode.search({ conditions: [{ attribute: 'parentId', value: id }] }));
-		return {
-			node: view(node),
-			children: children
-				.filter((child) => child.partition === node.partition && servable(child, principal, blocked))
-				.sort((a, b) => b.memberCount - a.memberCount)
-				.map(view),
-		};
+		const sameTree = children.filter((child) => child.partition === node.partition);
+		return { node: view(node), children: (await filterServable(sameTree, principal, barriers)).sort(bySize).map(view) };
 	}
 	const assigned = await collect(SummaryMember.search({ conditions: [{ attribute: 'leafId', value: id }] }));
 	const ids = assigned.filter((member) => member.eligible && member.partition === node.partition).map((m) => m.id);

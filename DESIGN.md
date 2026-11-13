@@ -28,7 +28,8 @@ cost and endpoints are in [README.md](README.md).
 
 - **One tree per exact label set** (`partitionLabels`, `src/partition.ts`); any set with `global` is `global`. Every
   member of a partition carries the node's labels, and withdrawn and flagged memories are never summarized, so for a
-  node agent-memory's full read rule reduces to `canReadLabels(principal, node.labels)` (`servable`, `src/serve.ts`).
+  node agent-memory's full read rule reduces to `canReadLabels(principal, node.labels)` (`Barriers.read`, `src/serve.ts`). A node also stops being served at `expiresAt`, the earliest `validUntil` of its
+  sources, without waiting for a rebuild.
 - **A pending revoking change hides its whole partition** on every surface (`Barriers`). A change revokes
   when the memory was withdrawn, newly content-flagged, or moved to another label set, judged against the stored
   member, not its eligibility (`revokesFrom`): a summary may still carry text from a member that became ineligible
@@ -36,7 +37,7 @@ cost and endpoints are in [README.md](README.md).
 - **Each serving request reads in one snapshot** (`inSnapshot`, `src/serve.ts`): Harper gives every read in one
   transaction on one database a consistent snapshot, so a request's barrier decisions and the summary text it returns
   are one point in time. Within it, serving reads node metadata without text, skips a node that cannot fit
-  the budget (`textChars`), checks the node's partition for a pending revoke (`Barriers`: one indexed lookup per
+  the budget (`textChars`), checks the node's partition for a pending revoke (`Barriers`: one lookup on the `revokePartition` index per
   partition, memoized for the request, never capped, so one tenant's burst hides nothing of another's), then reads
   the node.
 - **Hiding is replica-local, like agent-memory's own reads.** The change row is written in the memory's transaction
@@ -68,8 +69,9 @@ cost and endpoints are in [README.md](README.md).
 - **Ids are stable**: a re-cluster pairs each new group with the old node sharing most members (`matchByOverlap`).
 - **One runner at a time.** The lease row is read and written under the runner record lock (`lockRunner`:
   cluster-exclusive when Harper has record-lock transport, node-exclusive otherwise), renewed before each model call,
-  and renewed through that lock inside every publish transaction (`#assertLease`), so Harper refuses a commit whose
-  lock lease expired. Without cluster locks, two nodes can both hold the lease within replication lag, and a stale
+  and renewed through that lock inside every publish transaction (`#assertLease`). In Harper 5.4's source a write
+  staged through an expired lock handle is refused at commit (409); that is observed behavior, not a documented
+  promise, so the lease also bounds how stale a holder can be. Without cluster locks, two nodes can both hold the lease within replication lag, and a stale
   publish replicates over a newer one; the `runner: false` option confines rebuilds to one node there. Record locks
   need RocksDB, as agent-memory's own lifecycle writes do.
 - **No plugin transaction holds two member locks.** The startup walk takes one per transaction. agent-memory's

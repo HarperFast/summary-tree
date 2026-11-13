@@ -323,6 +323,7 @@ export class Runner {
 							memoryId: row.memoryId,
 							revision: row.revision,
 							revoke: true,
+							revokePartition: other,
 							createdAt: new Date(),
 						},
 						txn,
@@ -398,6 +399,16 @@ export class Runner {
 		});
 
 		const revisionOf = new Map(members.map((member) => [member.id, member]));
+		const expiryOf = new Map<string, number>();
+		for (const memory of eligible) {
+			const time = memory.validUntil ? new Date(memory.validUntil as string).getTime() : NaN;
+			if (!Number.isNaN(time)) expiryOf.set(memory.id as string, time);
+		}
+		// the earliest validUntil among a node's sources, so serving can stop at expiry even if no rebuild runs
+		const earliest = (times: (number | undefined | null)[]) => {
+			const known = times.filter((time): time is number => typeof time === 'number');
+			return known.length ? new Date(Math.min(...known)) : null;
+		};
 		const written = new Map<string, Record<string, unknown>>();
 		const maxInputChars = promptInputChars(settings);
 		for (const node of plan.nodes) {
@@ -435,6 +446,10 @@ export class Runner {
 					summarizedAt: kept.summarizedAt,
 				};
 			}
+			const sourceIds = content.sourceIds as string[];
+			content.expiresAt = leaf
+				? earliest(sourceIds.map((id) => expiryOf.get(id)))
+				: earliest(children.map((child) => (child.expiresAt ? (child.expiresAt as Date).getTime() : null)));
 			written.set(node.id, {
 				id: node.id,
 				partition,

@@ -39,6 +39,8 @@ type SummaryNode @table(database: "memory") {
 	# every memory whose text this node's summary was derived from, directly or through children
 	sourceIds: [String] @indexed
 	summarizedAt: Date
+	# earliest validUntil among the memories its text came from; serving stops at it
+	expiresAt: Date
 }
 
 # Append-only work queue. A row with revoke: true hides its whole partition until a pass absorbs it.
@@ -49,6 +51,8 @@ type SummaryChange @table(database: "memory") {
 	memoryId: String
 	revision: Int
 	revoke: Boolean @indexed
+	# the partition, on revoking rows only, so a barrier check is one index lookup
+	revokePartition: String @indexed
 	createdAt: Date
 }
 

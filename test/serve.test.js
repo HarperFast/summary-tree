@@ -73,7 +73,13 @@ test("a reader of one customer label never sees another customer's partition", a
 });
 
 test('a pending revoking change hides its whole partition from every surface until absorbed', async () => {
-	await SummaryChange.put({ id: 'c1', partition: partitionId(['customer:acme']), revoke: true, memoryId: 'm-x' });
+	await SummaryChange.put({
+		id: 'c1',
+		partition: partitionId(['customer:acme']),
+		revokePartition: partitionId(['customer:acme']),
+		revoke: true,
+		memoryId: 'm-x',
+	});
 	assert.ok(!(await readableTopNodes(acmeReader)).nodes.some((n) => n.id === 'acme-1'));
 	assert.deepEqual([...(await annotateHits(acmeReader, [{ id: 'm-acme' }])).keys()], []);
 	await assert.rejects(expandNode(acmeReader, 'acme-1'), { statusCode: 404 });
@@ -119,22 +125,57 @@ test('expanding returns children of an interior node and member ids of a leaf; u
 
 test('barriers are probed per partition', async () => {
 	for (let i = 0; i < 70; i++) {
-		await SummaryChange.put({ id: `other-${i}`, partition: `p${i}`, revoke: true, memoryId: `m${i}` });
+		await SummaryChange.put({
+			id: `other-${i}`,
+			partition: `p${i}`,
+			revokePartition: `p${i}`,
+			revoke: true,
+			memoryId: `m${i}`,
+		});
 	}
 	assert.deepEqual(
 		(await readableTopNodes(acmeReader)).nodes.map((n) => n.id),
 		['global-1', 'acme-1', 'acme-beta-1'],
 	);
-	await SummaryChange.put({ id: 'acme-r', partition: partitionId(['customer:acme']), revoke: true, memoryId: 'm-x' });
+	await SummaryChange.put({
+		id: 'acme-r',
+		partition: partitionId(['customer:acme']),
+		revokePartition: partitionId(['customer:acme']),
+		revoke: true,
+		memoryId: 'm-x',
+	});
 	assert.ok(!(await readableTopNodes(acmeReader)).nodes.some((n) => n.id === 'acme-1'));
 	await assert.rejects(expandNode(acmeReader, 'acme-1'), { statusCode: 404 });
 });
 
 test("a burst of revocations in other partitions never hides a reader's healthy partitions", async () => {
 	for (let i = 0; i < 70; i++) {
-		await SummaryChange.put({ id: `other-${i}`, partition: `p${i}`, revoke: true, memoryId: `m${i}` });
+		await SummaryChange.put({
+			id: `other-${i}`,
+			partition: `p${i}`,
+			revokePartition: `p${i}`,
+			revoke: true,
+			memoryId: `m${i}`,
+		});
 		await node(`n${i}`, [`team:t${i}`], { memberCount: 100 + i });
 	}
 	const served = (await readableTopNodes(admin)).nodes;
 	assert.equal(served.length, 74, 'every healthy partition is served');
+});
+
+test('a node past the earliest validUntil of its sources is not served, even before a rebuild', async () => {
+	await node('acme-1', ['customer:acme'], { memberCount: 5, expiresAt: new Date(Date.now() - 1000) });
+	assert.ok(!(await readableTopNodes(acmeReader)).nodes.some((n) => n.id === 'acme-1'));
+	await assert.rejects(expandNode(acmeReader, 'acme-1'), { statusCode: 404 });
+});
+
+test('orientation stops after 128 probed candidates, served or not', async () => {
+	for (let i = 0; i < 130; i++) {
+		const scopes = [`team:b${i}`];
+		const partition = partitionId(partitionLabels(scopes));
+		await node(`blocked-${i}`, scopes, { memberCount: 1000 + i });
+		await SummaryChange.put({ id: `b${i}`, partition, revokePartition: partition, revoke: true, memoryId: `m${i}` });
+	}
+	const items = await orientation(admin, 100_000);
+	assert.deepEqual(items, [], 'the healthy, smaller nodes lie past the attempt budget');
 });

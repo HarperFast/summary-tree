@@ -1,6 +1,6 @@
 import * as agentMemory from '@harperfast/agent-memory';
 import type { Principal } from '@harperfast/agent-memory';
-import { isEligible, partitionId, partitionLabels } from './partition.ts';
+import { isEligible, isExpired, partitionId, partitionLabels } from './partition.ts';
 import { transaction } from 'harper';
 import { summaryTables } from './store.ts';
 
@@ -24,7 +24,7 @@ async function collect<T = any>(iterable: any): Promise<T[]> {
 	return rows;
 }
 
-const META = ['id', 'partition', 'labels', 'level', 'parentId', 'top', 'memberCount', 'textChars'];
+const META = ['id', 'partition', 'labels', 'level', 'parentId', 'top', 'memberCount', 'textChars', 'expiresAt'];
 
 /**
  * Pending revoking changes for one request: an indexed probe per partition the request is about to serve, memoized,
@@ -44,14 +44,7 @@ export class Barriers {
 		if (blocked === undefined) {
 			blocked = collect(
 				summaryTables().SummaryChange.search(
-					{
-						conditions: [
-							{ attribute: 'partition', value: partition },
-							{ attribute: 'revoke', value: true },
-						],
-						select: ['id'],
-						limit: 1,
-					},
+					{ conditions: [{ attribute: 'revokePartition', value: partition }], select: ['id'], limit: 1 },
 					this.txn,
 				),
 			).then((rows) => rows.length > 0);
@@ -66,7 +59,8 @@ export class Barriers {
 	 * members are never summarized, so the label test decides.
 	 */
 	async read(meta: any, principal: Principal): Promise<any> {
-		if (!meta || !agentMemory.canReadLabels(principal, meta.labels) || (await this.isBlocked(meta.partition))) return;
+		if (!meta || !agentMemory.canReadLabels(principal, meta.labels) || isExpired(meta.expiresAt, Date.now())) return;
+		if (await this.isBlocked(meta.partition)) return;
 		const node = await summaryTables().SummaryNode.get(meta.id, this.txn);
 		if (node?.summary && node.partition === meta.partition) return node;
 	}

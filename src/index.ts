@@ -6,8 +6,6 @@ import { annotateHits, orientation } from './serve.ts';
 import { parseSettings } from './settings.ts';
 import { recordMemory } from './store.ts';
 
-export { parseSettings, type Settings } from './settings.ts';
-
 const REQUIRED_EXPORTS = [
 	'registerMemorySink',
 	'registerBootstrapSection',
@@ -18,8 +16,8 @@ const REQUIRED_EXPORTS = [
 	'canReadLabels',
 ] as const;
 
-export const ORIENTATION_SECTION = 'orientation';
-export const SEARCH_ANNOTATION = 'summaryTree';
+const ORIENTATION_SECTION = 'orientation';
+const SEARCH_ANNOTATION = 'summaryTree';
 
 export async function handleApplication(scope: Scope): Promise<void> {
 	const missing = REQUIRED_EXPORTS.filter((name) => typeof (agentMemory as any)[name] !== 'function');

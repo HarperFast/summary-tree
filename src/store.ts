@@ -86,6 +86,7 @@ export async function recordMemory(
 				memoryId: id,
 				revision,
 				revoke: rowRevoke,
+				revokePartition: rowRevoke ? rowPartition : null,
 				createdAt: new Date(options.now),
 			},
 			context,

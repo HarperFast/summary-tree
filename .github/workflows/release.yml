@@ -83,6 +83,7 @@ jobs:
         with:
           name: package
 
-      # Auth is npm trusted publishing (OIDC) via id-token: no NODE_AUTH_TOKEN/secret. Configured at
-      # npmjs.com: Trusted Publisher -> HarperFast/summary-tree, release.yml, Release environment.
-      - run: npm publish ./*.tgz --provenance --access public --tag "${{ needs.verify.outputs.dist-tag }}"
+      # Auth is npm trusted publishing (OIDC) via id-token: no NODE_AUTH_TOKEN/secret. Setup: README.md "Releasing".
+      - run: npm publish ./*.tgz --provenance --access public --tag "$DIST_TAG"
+        env:
+          DIST_TAG: ${{ needs.verify.outputs.dist-tag }}

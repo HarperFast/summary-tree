@@ -134,3 +134,12 @@ test('past the prefetch limit, barriers are probed per partition', async () => {
 	assert.ok(!(await readableTopNodes(acmeReader)).some((n) => n.id === 'acme-1'));
 	await assert.rejects(expandNode(acmeReader, 'acme-1'), { statusCode: 404 });
 });
+
+test('past the prefetch limit, at most 64 partitions are probed per request and the rest stay hidden', async () => {
+	for (let i = 0; i < 70; i++) {
+		await SummaryChange.put({ id: `other-${i}`, partition: `p${i}`, revoke: true, memoryId: `m${i}` });
+		await node(`n${i}`, [`team:t${i}`], { memberCount: 100 + i });
+	}
+	const served = await readableTopNodes(admin);
+	assert.ok(served.length <= 64, `served ${served.length}`);
+});

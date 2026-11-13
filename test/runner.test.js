@@ -179,9 +179,18 @@ test('a memory moved to another label set on another node revokes the partition 
 		revision: 2,
 		revoke: false,
 	});
-	modelState.onGenerate = async () => {};
+	modelState.generate = async () => {
+		throw new Error('model unavailable');
+	};
 	await runner.tick();
 	assert.ok(acmeNode.sourceIds.includes(moved.id));
+	assert.ok(
+		rows('SummaryChange').some((change) => change.partition === ACME && change.revoke),
+		'the revoke lands even though the rebuild failed',
+	);
+	assert.deepEqual(await readableTopNodes(acmeReader), []);
+	modelState.generate = undefined;
+	await runner.tick();
 	await until('customer:acme to be rebuilt without the moved memory', async () => {
 		const node = rows('SummaryNode').find((n) => n.partition === ACME);
 		return node && !node.sourceIds.includes(moved.id) && rows('SummaryChange').length === 0;

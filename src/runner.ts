@@ -50,7 +50,6 @@ export class Runner {
 	#backoff = 0;
 	#rerun = false;
 	#subscription: AsyncIterator<unknown> | undefined;
-	// vectors embedded here for memories agent-memory embedded with another model, by `id@revision`
 	#vectorCache = new Map<string, Vector>();
 
 	constructor(settings: Settings, log: Log) {
@@ -116,10 +115,9 @@ export class Runner {
 	}
 
 	async #subscribe(): Promise<void> {
-		const { SummaryChange } = summaryTables();
 		while (!this.#stopped) {
 			try {
-				const events = await SummaryChange.subscribe({});
+				const events = await summaryTables().SummaryChange.subscribe({});
 				this.#subscription = events[Symbol.asyncIterator]();
 				if (this.#stopped) break;
 				// a change committed while unsubscribed is caught by the tick this schedules
@@ -299,6 +297,26 @@ export class Runner {
 		);
 		const revoked = new Set<string>(changes.filter((change) => change.revoke).map((change) => change.memoryId));
 		const orphaned = await this.#orphanedPartitions(changes, partition);
+		if (orphaned.size) {
+			// before any model call, so a failing rebuild here cannot leave the other partitions served
+			await transaction(async (txn: object) => {
+				await this.#assertLease(txn);
+				for (const [other, row] of orphaned) {
+					await SummaryChange.put(
+						{
+							id: randomUUID(),
+							partition: other,
+							labels: row.labels,
+							memoryId: row.memoryId,
+							revision: row.revision,
+							revoke: true,
+							createdAt: new Date(),
+						},
+						txn,
+					);
+				}
+			});
+		}
 		const now = Date.now();
 		const rows = (
 			await collect<any>(SummaryMember.search({ conditions: [{ attribute: 'partition', value: partition }] }))
@@ -434,24 +452,10 @@ export class Runner {
 			} else if (meta) {
 				await SummaryPartition.delete(partition, txn);
 			}
-			for (const [other, row] of orphaned) {
-				await SummaryChange.put(
-					{
-						id: randomUUID(),
-						partition: other,
-						labels: row.labels,
-						memoryId: row.memoryId,
-						revision: row.revision,
-						revoke: true,
-						createdAt: new Date(),
-					},
-					txn,
-				);
-			}
 		});
 
-		// One member lock per transaction, like every writer but the sink. The changes are deleted only after these, so
-		// a crash in between leaves them for the next pass, which repeats the assignments without new model calls.
+		// One member lock per transaction, like every writer but the sink. The changes are deleted after these, so a crash
+		// in between leaves them for the next pass.
 		const updates = [...plan.leafOf.entries()]
 			.filter(([id, leafId]) => storedLeaf.get(id) !== leafId)
 			.map(([id, leafId]) => ({ id, leafId, expire: false }))

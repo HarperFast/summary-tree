@@ -24,16 +24,18 @@ async function collect<T = any>(iterable: any): Promise<T[]> {
 }
 
 const BARRIER_PREFETCH = 64;
+const PROBE_LIMIT = 64;
+const META = ['id', 'partition', 'labels', 'level', 'parentId', 'top', 'memberCount'];
 
 /**
- * Partitions hidden by a pending revoking change, for one request: one query while at most BARRIER_PREFETCH are
- * pending, else an indexed probe per partition asked about, memoized.
+ * Pending revoking changes for one request, consulted before any summary text is read: one query while at most
+ * BARRIER_PREFETCH are pending, else an indexed probe per partition, at most PROBE_LIMIT of them; partitions past
+ * that count as hidden.
  */
 export class Barriers {
 	#known: Promise<Set<string> | undefined> | undefined;
 	#probed = new Map<string, Promise<boolean>>();
 
-	/** Reads the pending set; call before reading the node text it will guard. */
 	prefetch(): Promise<Set<string> | undefined> {
 		this.#known ??= collect(
 			summaryTables().SummaryChange.search({
@@ -47,46 +49,51 @@ export class Barriers {
 
 	async isBlocked(partition: string): Promise<boolean> {
 		const known = await this.prefetch();
-		return known ? known.has(partition) : this.probe(partition);
-	}
-
-	probe(partition: string): Promise<boolean> {
+		if (known) return known.has(partition);
 		let blocked = this.#probed.get(partition);
 		if (blocked === undefined) {
-			blocked = collect(
-				summaryTables().SummaryChange.search({
-					conditions: [
-						{ attribute: 'partition', value: partition },
-						{ attribute: 'revoke', value: true },
-					],
-					select: ['id'],
-					limit: 1,
-				}),
-			).then((rows) => rows.length > 0);
+			blocked =
+				this.#probed.size >= PROBE_LIMIT
+					? Promise.resolve(true)
+					: collect(
+							summaryTables().SummaryChange.search({
+								conditions: [
+									{ attribute: 'partition', value: partition },
+									{ attribute: 'revoke', value: true },
+								],
+								select: ['id'],
+								limit: 1,
+							}),
+						).then((rows) => rows.length > 0);
 			this.#probed.set(partition, blocked);
 		}
 		return blocked;
 	}
-}
 
-/**
- * A node a principal may see: every member it was built from carries exactly the node's labels, and withdrawn or
- * flagged members are never summarized, so the label test decides; a pending revocation hides the partition.
- */
-async function servable(node: any, principal: Principal, barriers: Barriers): Promise<boolean> {
-	return readable(node, principal) && !(await barriers.isBlocked(node.partition));
-}
+	/**
+	 * The node behind `meta` (a row read without its text), read only after its partition's barrier was checked;
+	 * undefined when the principal may not see it. Every member carries the node's labels and withdrawn or flagged
+	 * members are never summarized, so the label test decides.
+	 */
+	async read(meta: any, principal: Principal): Promise<any> {
+		if (!meta || !agentMemory.canReadLabels(principal, meta.labels) || (await this.isBlocked(meta.partition))) return;
+		const node = await summaryTables().SummaryNode.get(meta.id);
+		if (node?.summary && node.partition === meta.partition) return node;
+	}
 
-function readable(node: any, principal: Principal): boolean {
-	return Boolean(node?.summary) && agentMemory.canReadLabels(principal, node.labels);
-}
-
-async function filterServable(nodes: any[], principal: Principal, barriers: Barriers): Promise<any[]> {
-	const keep = await Promise.all(nodes.map((node) => servable(node, principal, barriers)));
-	return nodes.filter((_, index) => keep[index]);
+	async readAll(metas: readonly any[], principal: Principal): Promise<any[]> {
+		const nodes = await Promise.all(metas.map((meta) => this.read(meta, principal)));
+		return nodes.filter((node) => node !== undefined);
+	}
 }
 
 const bySize = (a: any, b: any) => b.memberCount - a.memberCount || (a.id < b.id ? -1 : 1);
+
+function metaSearch(conditions: object[]): Promise<any[]> {
+	return collect(summaryTables().SummaryNode.search({ conditions, select: META }));
+}
+
+const readableMeta = (principal: Principal) => (meta: any) => agentMemory.canReadLabels(principal, meta.labels);
 
 export interface NodeView {
 	id: string;
@@ -108,11 +115,11 @@ function view(node: any): NodeView {
 	};
 }
 
-export async function readableTopNodes(principal: Principal, barriers = new Barriers()): Promise<NodeView[]> {
-	const { SummaryNode } = summaryTables();
+export async function readableTopNodes(principal: Principal): Promise<NodeView[]> {
+	const barriers = new Barriers();
 	await barriers.prefetch();
-	const tops = await collect(SummaryNode.search({ conditions: [{ attribute: 'top', value: true }] }));
-	return (await filterServable(tops, principal, barriers)).sort(bySize).map(view);
+	const tops = (await metaSearch([{ attribute: 'top', value: true }])).filter(readableMeta(principal)).sort(bySize);
+	return (await barriers.readAll(tops, principal)).map(view);
 }
 
 const PENDING_SCAN_LIMIT = 1000;
@@ -143,25 +150,24 @@ const MAX_ORIENTATION_ITEMS = 64;
  * packed into the budget agent-memory left. A node that does not fit is skipped along with its subtree.
  */
 export async function orientation(principal: Principal, budgetChars: number) {
-	const { SummaryNode } = summaryTables();
 	const barriers = new Barriers();
 	await barriers.prefetch();
 	const items: { title: string; content: string }[] = [];
 	let remaining = budgetChars;
-	const tops = await collect(SummaryNode.search({ conditions: [{ attribute: 'top', value: true }] }));
-	let level: any[] = tops.filter((node) => readable(node, principal)).sort(bySize);
+	let level = (await metaSearch([{ attribute: 'top', value: true }])).filter(readableMeta(principal)).sort(bySize);
 	while (level.length && items.length < MAX_ORIENTATION_ITEMS) {
 		const next: any[] = [];
-		for (const node of level) {
+		for (const meta of level) {
 			if (items.length >= MAX_ORIENTATION_ITEMS) break;
+			const node = await barriers.read(meta, principal);
+			if (!node) continue;
 			const item = orientationItem(view(node));
 			const size = item.title.length + item.content.length;
-			if (size > remaining || (await barriers.isBlocked(node.partition))) continue;
+			if (size > remaining) continue;
 			items.push(item);
 			remaining -= size;
 			if (node.level > 1) {
-				const children = await collect(SummaryNode.search({ conditions: [{ attribute: 'parentId', value: node.id }] }));
-				next.push(...children.filter((child) => readable(child, principal)));
+				next.push(...(await metaSearch([{ attribute: 'parentId', value: node.id }])).filter(readableMeta(principal)));
 			}
 		}
 		level = next.sort(bySize);
@@ -173,36 +179,35 @@ export async function annotateHits(
 	principal: Principal,
 	hits: readonly Readonly<Record<string, unknown>>[],
 ): Promise<Map<string, NodeView>> {
-	const { SummaryMember, SummaryNode } = summaryTables();
+	const { SummaryMember } = summaryTables();
 	const barriers = new Barriers();
 	await barriers.prefetch();
 	const members = await Promise.all(hits.map((hit) => SummaryMember.get(hit.id as string)));
 	const leafIds = [...new Set(members.filter((member) => member?.eligible && member.leafId).map((m) => m.leafId))];
-	const leaves = new Map<string, any>(
-		await Promise.all(leafIds.map(async (id): Promise<[string, any]> => [id, await SummaryNode.get(id)])),
-	);
+	const leaves = new Map<string, any>();
+	for (const id of leafIds) {
+		const [meta] = await metaSearch([{ attribute: 'id', value: id }]);
+		leaves.set(id, await barriers.read(meta, principal));
+	}
 	const annotations = new Map<string, NodeView>();
 	for (const [index, member] of members.entries()) {
-		if (!member?.eligible || !member.leafId) continue;
-		const leaf = leaves.get(member.leafId);
-		if (leaf?.partition !== member.partition || !(await servable(leaf, principal, barriers))) continue;
-		annotations.set(hits[index].id as string, view(leaf));
+		const leaf = member?.eligible && member.leafId ? leaves.get(member.leafId) : undefined;
+		if (leaf && leaf.partition === member.partition) annotations.set(hits[index].id as string, view(leaf));
 	}
 	return annotations;
 }
 
 export async function expandNode(principal: Principal, id: string) {
-	const { SummaryMember, SummaryNode } = summaryTables();
+	const { SummaryMember } = summaryTables();
 	const barriers = new Barriers();
-	const located = await SummaryNode.get(id);
-	if (!readable(located, principal) || (await barriers.probe(located.partition))) throw notFound();
-	// the text served is read after the barrier check
-	const node = await SummaryNode.get(id);
-	if (!readable(node, principal) || node.partition !== located.partition) throw notFound();
+	const [meta] = await metaSearch([{ attribute: 'id', value: id }]);
+	const node = await barriers.read(meta, principal);
+	if (!node) throw notFound();
 	if (node.level > 1) {
-		const children = await collect(SummaryNode.search({ conditions: [{ attribute: 'parentId', value: id }] }));
-		const sameTree = children.filter((child) => child.partition === node.partition && readable(child, principal));
-		return { node: view(node), children: sameTree.sort(bySize).map(view) };
+		const children = (await metaSearch([{ attribute: 'parentId', value: id }])).filter(
+			(child) => child.partition === node.partition,
+		);
+		return { node: view(node), children: (await barriers.readAll(children, principal)).sort(bySize).map(view) };
 	}
 	const assigned = await collect(SummaryMember.search({ conditions: [{ attribute: 'leafId', value: id }] }));
 	const ids = assigned.filter((member) => member.eligible && member.partition === node.partition).map((m) => m.id);

@@ -27,13 +27,14 @@ cost and endpoints are in [README.md](README.md).
 - **One tree per exact label set** (`partitionLabels`, `src/partition.ts`); any set with `global` is `global`. Every
   member of a partition carries the node's labels, and withdrawn and flagged memories are never summarized, so for a
   node agent-memory's full read rule reduces to `canReadLabels(principal, node.labels)` (`servable`, `src/serve.ts`).
-- **A pending revoking change hides its whole partition** on every surface (`blockedPartitions`). A change revokes
+- **A pending revoking change hides its whole partition** on every surface (`Barriers`). A change revokes
   when the memory was withdrawn, newly content-flagged, or moved to another label set, judged against the stored
   member, not its eligibility (`revokesFrom`): a summary may still carry text from a member that became ineligible
   for another reason, and the later withdrawal must still revoke.
-- **Barriers are read before the text they guard** (`Barriers`, `src/serve.ts`): one query for every pending revoke
-  while at most 64 are pending, else an indexed probe (`partition`, `revoke`) per partition the request touches. Expand
-  probes its node's partition, then re-reads the node.
+- **Barriers are checked before the text they guard** (`Barriers.read`, `src/serve.ts`): serving reads node metadata
+  without text, checks the partition's barrier, then reads the node. The check is one query for every pending revoke
+  while at most 64 are pending, else an indexed probe (`partition`, `revoke`) per partition, at most 64 per request;
+  partitions past that are treated as hidden.
 - **Hiding is replica-local, like agent-memory's own reads.** The change row is written in the memory's transaction
   in the same database, so a node stops serving the partition when that replica of the memory changes. No serving
   path waits on another node.

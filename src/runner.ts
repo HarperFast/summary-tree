@@ -247,7 +247,9 @@ export class Runner {
 		const { SummaryState } = summaryTables();
 		await lockRunner(txn);
 		const state = await SummaryState.get(RUNNER_ID, txn);
-		if (state?.leaseHolder !== this.holderId || !(state.leaseUntil > Date.now())) throw new LeaseLostError();
+		if (this.#stopped || state?.leaseHolder !== this.holderId || !(state.leaseUntil > Date.now())) {
+			throw new LeaseLostError();
+		}
 		await SummaryState.put({ ...state, leaseUntil: Date.now() + this.settings.leaseMs }, txn);
 	}
 

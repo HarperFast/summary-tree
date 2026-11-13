@@ -23,10 +23,7 @@ async function collect<T = any>(iterable: any): Promise<T[]> {
 	return rows;
 }
 
-/**
- * Whether a pending revoking change hides a partition: a member left, was withdrawn or flagged since the last
- * rebuild. One indexed lookup per partition a request touches, memoized for that request.
- */
+/** Pending revoking changes, looked up per partition and memoized for one request. */
 export class Barriers {
 	#blocked = new Map<string, Promise<boolean>>();
 
@@ -55,8 +52,11 @@ export class Barriers {
  * flagged members are never summarized, so the label test decides; a pending revocation hides the partition.
  */
 async function servable(node: any, principal: Principal, barriers: Barriers): Promise<boolean> {
-	if (!node?.summary || !agentMemory.canReadLabels(principal, node.labels)) return false;
-	return !(await barriers.isBlocked(node.partition));
+	return readable(node, principal) && !(await barriers.isBlocked(node.partition));
+}
+
+function readable(node: any, principal: Principal): boolean {
+	return Boolean(node?.summary) && agentMemory.canReadLabels(principal, node.labels);
 }
 
 async function filterServable(nodes: any[], principal: Principal, barriers: Barriers): Promise<any[]> {
@@ -95,14 +95,13 @@ export async function readableTopNodes(principal: Principal, barriers = new Barr
 const PENDING_SCAN_LIMIT = 1000;
 
 /**
- * Whether a partition the principal can read has changes the runner has not applied yet. A backlog larger than the
- * scan limit reports pending without reading it all.
+ * Whether a partition the principal can read has changes not yet applied. Reads at most PENDING_SCAN_LIMIT changes,
+ * so behind a larger backlog of other partitions' changes it can answer false.
  */
 export async function hasPendingWork(principal: Principal): Promise<boolean> {
 	const { SummaryChange } = summaryTables();
-	let scanned = 0;
-	for await (const change of await SummaryChange.search({ select: ['labels'], limit: PENDING_SCAN_LIMIT + 1 })) {
-		if (++scanned > PENDING_SCAN_LIMIT || agentMemory.canReadLabels(principal, change.labels)) return true;
+	for await (const change of await SummaryChange.search({ select: ['labels'], limit: PENDING_SCAN_LIMIT })) {
+		if (agentMemory.canReadLabels(principal, change.labels)) return true;
 	}
 	return false;
 }
@@ -125,22 +124,24 @@ export async function orientation(principal: Principal, budgetChars: number) {
 	const barriers = new Barriers();
 	const items: { title: string; content: string }[] = [];
 	let remaining = budgetChars;
-	let level: NodeView[] = await readableTopNodes(principal, barriers);
+	const tops = await collect(SummaryNode.search({ conditions: [{ attribute: 'top', value: true }] }));
+	let level: any[] = tops.filter((node) => readable(node, principal)).sort(bySize);
 	while (level.length && items.length < MAX_ORIENTATION_ITEMS) {
 		const next: any[] = [];
 		for (const node of level) {
 			if (items.length >= MAX_ORIENTATION_ITEMS) break;
-			const item = orientationItem(node);
+			const item = orientationItem(view(node));
 			const size = item.title.length + item.content.length;
-			if (size > remaining) continue;
+			// the barrier lookup only for a node that would be emitted
+			if (size > remaining || (await barriers.isBlocked(node.partition))) continue;
 			items.push(item);
 			remaining -= size;
 			if (node.level > 1) {
 				const children = await collect(SummaryNode.search({ conditions: [{ attribute: 'parentId', value: node.id }] }));
-				next.push(...(await filterServable(children, principal, barriers)));
+				next.push(...children.filter((child) => readable(child, principal)));
 			}
 		}
-		level = next.sort(bySize).map(view);
+		level = next.sort(bySize);
 	}
 	return items;
 }

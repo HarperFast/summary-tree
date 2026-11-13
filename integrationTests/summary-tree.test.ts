@@ -288,20 +288,21 @@ suite('summary-tree over agent-memory running as a separate app', (ctx: ContextW
 	});
 
 	test('a withdrawn member hides its partition at once, and the rebuilt summary no longer carries it', async () => {
-		const unique = 'zeppelin';
 		const tag = 'acme-extra';
-		ids[tag] = memId(tag);
-		strictEqual(
-			(
-				await call('admin', 'PUT', `Memory/${ids[tag]}`, {
-					title: `acme walrus ${unique}`,
-					content: `acme walrus ${unique} rollout`,
-					scopes: ['customer:acme'],
-				})
-			).status,
-			201,
-		);
-		await until('the acme summary to include the new memory', async () =>
+		// two joins reach the default dirty threshold of a 6-member leaf
+		for (const [key, word] of [
+			[tag, 'zeppelin'],
+			['acme-extra2', 'dirigible'],
+		]) {
+			ids[key] = memId(key);
+			const response = await call('admin', 'PUT', `Memory/${ids[key]}`, {
+				title: `acme walrus ${word}`,
+				content: `acme walrus ${word} rollout`,
+				scopes: ['customer:acme'],
+			});
+			strictEqual(response.status, 201, JSON.stringify(response.body));
+		}
+		await until('the acme summary to include the new memories', async () =>
 			/zeppelin/.test(text(await orientation('bob'))) ? true : undefined,
 		);
 
@@ -332,9 +333,13 @@ suite('summary-tree over agent-memory running as a separate app', (ctx: ContextW
 			const carol = text(await orientation('carol'));
 			return /pelican/.test(carol) && !/sso/.test(carol) ? true : undefined;
 		});
-		await until('acme to be rebuilt with the moved memory', async () =>
-			/sso/.test(text(await orientation('bob'))) ? true : undefined,
-		);
+		// one join stays below the dirty threshold: acme keeps its text, but the memory is assigned to its leaf
+		const hit = await until('the moved memory to be assigned to the acme leaf', async () => {
+			const response = await search('bob', 'pelican sso setup');
+			const found = response.body.memories?.find((memory: any) => memory.id === moved);
+			return /walrus/.test(found?.summaryTree?.summary ?? '') ? found : undefined;
+		});
+		ok(!/pelican/.test(hit.summaryTree.summary), 'acme text was not rebuilt for one join');
 	});
 });
 

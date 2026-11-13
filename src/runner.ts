@@ -4,7 +4,7 @@ import { threadId } from 'node:worker_threads';
 import { models, transaction } from 'harper';
 import * as agentMemory from '@harperfast/agent-memory';
 import { normalize, type Vector } from './kmeans.ts';
-import { isEligible, isExpired, memberText, partitionId, partitionLabels } from './partition.ts';
+import { contentHash, isEligible, isExpired, memberText, partitionId, partitionLabels } from './partition.ts';
 import { memberRef, planPartition, type ExistingNode, type PlanMember } from './plan.ts';
 import { promptInputChars, type Settings } from './settings.ts';
 import { lockRow, recordMemory, summaryTables } from './store.ts';
@@ -250,6 +250,12 @@ export class Runner {
 		await SummaryState.put({ ...state, leaseUntil: Date.now() + this.settings.leaseMs }, txn);
 	}
 
+	/** Without the runner lock: the assignments it guards only steer annotations, never what is served. */
+	async #checkLease(txn: object): Promise<void> {
+		const state = await summaryTables().SummaryState.get(RUNNER_ID, txn);
+		if (state?.leaseHolder !== this.holderId || !(state.leaseUntil > Date.now())) throw new LeaseLostError();
+	}
+
 	async #releaseLease(): Promise<void> {
 		const { SummaryState } = summaryTables();
 		await transaction(async (txn: object) => {
@@ -259,7 +265,6 @@ export class Runner {
 		});
 	}
 
-	/** Returns how many partitions failed. */
 	async #pass(): Promise<number> {
 		const { SummaryChange } = summaryTables();
 		const partitions = new Map<string, readonly string[]>();
@@ -286,8 +291,8 @@ export class Runner {
 
 	/**
 	 * Reads the partition's pending changes before its members, so a change committed after the member read survives
-	 * this pass and keeps the partition hidden (if it revokes) until the next one. The publish transaction deletes
-	 * exactly the changes read here, and only after every node they require has been rebuilt.
+	 * this pass and keeps the partition hidden (if it revokes) until the next one. The changes read here are deleted
+	 * last, in their own lease-fenced transaction, after every node they require is published.
 	 */
 	async rebuildPartition(partition: string, labels: readonly string[]): Promise<void> {
 		const { SummaryChange, SummaryMember, SummaryNode, SummaryPartition } = summaryTables();
@@ -301,27 +306,32 @@ export class Runner {
 			await collect<any>(SummaryMember.search({ conditions: [{ attribute: 'partition', value: partition }] }))
 		).map((row) => ({ ...row }));
 		const expired = rows.filter((row) => row.eligible && isExpired(row.validUntil, now));
-		// A memory that changed after its member row was written has its own pending change, not in `changes`: it is
-		// left out of this pass, and the next pass picks it up.
-		const recorded = new Map<string, number>(rows.filter((row) => row.eligible).map((row) => [row.id, row.revision]));
+		const recorded = new Map<string, string>(
+			rows.filter((row) => row.eligible).map((row) => [row.id, `${row.revision}:${row.contentHash}`]),
+		);
+		const stateOf = (memory: Record<string, unknown>) => `${memory.revision}:${contentHash(memory)}`;
 		const storedLeaf = new Map<string, string | null>(rows.map((row) => [row.id, row.leafId ?? null]));
 		const current = (await agentMemory.getMemories([...recorded.keys()])).filter(
 			(memory) => isEligible(memory, now) && partitionId(partitionLabels(memory.scopes)) === partition,
 		);
-		// A revision the member row did not have when read was committed since, with its member row: re-read that.
+		// A state the member row did not hold when read was committed since, together with its member row: re-read it.
+		// A memory whose member row still disagrees is left for its own pending change.
 		for (const memory of current) {
-			if (memory.revision === recorded.get(memory.id as string)) continue;
+			if (stateOf(memory) === recorded.get(memory.id as string)) continue;
 			const stored = await SummaryMember.get(memory.id);
-			if (stored?.eligible && stored.partition === partition) recorded.set(memory.id as string, stored.revision);
+			if (stored?.eligible && stored.partition === partition) {
+				recorded.set(memory.id as string, `${stored.revision}:${stored.contentHash}`);
+			}
 		}
-		const eligible = current.filter((memory) => memory.revision === recorded.get(memory.id as string));
+		const eligible = current.filter((memory) => stateOf(memory) === recorded.get(memory.id as string));
 		const textOf = new Map<string, string>(
 			eligible.map((memory) => [memory.id as string, memberText(memory, settings.memberChars)]),
 		);
-		const vectors = await this.#vectorsOf(eligible, textOf);
+		const vectors = await this.#vectorsOf(eligible, textOf, settings.embeddingModel);
 		const members: PlanMember[] = eligible.map((memory) => ({
 			id: memory.id as string,
 			revision: memory.revision as number,
+			hash: contentHash(memory),
 			vector: normalize(vectors.get(memory.id as string)!),
 			leafId: storedLeaf.get(memory.id as string) ?? null,
 		}));
@@ -400,6 +410,7 @@ export class Runner {
 			});
 		}
 
+		if (this.#stopped) throw new LeaseLostError();
 		await transaction(async (txn: object) => {
 			await this.#assertLease(txn);
 			for (const node of written.values()) await SummaryNode.put(node, txn);
@@ -428,6 +439,7 @@ export class Runner {
 			.concat(expired.map((row) => ({ id: row.id, leafId: null, expire: true })));
 		for (const update of updates) {
 			await transaction(async (txn: object) => {
+				await this.#checkLease(txn);
 				await lockRow(SummaryMember, update.id, txn);
 				const stored = await SummaryMember.get(update.id, txn);
 				if (!stored || stored.partition !== partition) return;
@@ -451,15 +463,16 @@ export class Runner {
 	async #vectorsOf(
 		memories: readonly Record<string, unknown>[],
 		textOf: ReadonlyMap<string, string>,
+		model: string,
 	): Promise<Map<string, Vector>> {
 		const vectors = new Map<string, Vector>();
 		const missing: { id: string; key: string }[] = [];
 		for (const memory of memories) {
 			const id = memory.id as string;
 			const embedding = memory.embedding as readonly number[] | undefined;
-			const key = `${this.settings.embeddingModel}\0${id}@${memory.revision}`;
+			const key = `${model}\0${id}@${memory.revision}:${contentHash(memory)}`;
 			const cached = this.#vectorCache.get(key);
-			if (memory.embeddingModel === this.settings.embeddingModel && embedding?.length) vectors.set(id, embedding);
+			if (memory.embeddingModel === model && embedding?.length) vectors.set(id, embedding);
 			else if (cached) vectors.set(id, cached);
 			else missing.push({ id, key });
 		}
@@ -467,7 +480,7 @@ export class Runner {
 			const batch = missing.slice(start, start + EMBED_BATCH);
 			const embedded = await models.embed(
 				batch.map(({ id }) => textOf.get(id)!),
-				{ model: this.settings.embeddingModel },
+				{ model },
 			);
 			batch.forEach(({ id, key }, index) => {
 				vectors.set(id, embedded[index]);
@@ -479,14 +492,7 @@ export class Runner {
 	}
 }
 
-/**
- * The runner lock, in `txn`. Harper makes it cluster-exclusive when record-lock replication is configured and
- * node-exclusive otherwise; LMDB has no record locks (501), where the lease row alone arbitrates.
- */
-async function lockRunner(txn: object): Promise<void> {
-	try {
-		await summaryTables().SummaryState.lock(RUNNER_ID, { lease: 10_000, timeout: 10_000 }, txn);
-	} catch (error: any) {
-		if (error?.statusCode !== 501) throw error;
-	}
+/** Cluster-exclusive when Harper has record-lock replication configured, node-exclusive otherwise. */
+function lockRunner(txn: object): Promise<unknown> {
+	return summaryTables().SummaryState.lock(RUNNER_ID, { lease: 10_000, timeout: 10_000 }, txn);
 }

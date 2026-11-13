@@ -128,3 +128,14 @@ test('the startup walk records an equal revision in a different state: two nodes
 	assert.equal(applied, true);
 	assert.deepEqual(changes(), [{ partition: ACME, revoke: true, memoryId: 'mem-aaaaaaaaaaaaaaaa' }]);
 });
+
+test('the startup walk records an equal revision with different text', async () => {
+	await transaction((txn) => recordMemory(memory({ revision: 5 }), txn, opts));
+	resetChanges();
+	const applied = await transaction((txn) =>
+		recordMemory(memory({ revision: 5, content: 'redacted' }), txn, { ...opts, onlyIfNewer: true }),
+	);
+	assert.equal(applied, true);
+	assert.notEqual(rows('SummaryMember')[0].contentHash, undefined);
+	assert.deepEqual(changes(), [{ partition: ACME, revoke: false, memoryId: 'mem-aaaaaaaaaaaaaaaa' }]);
+});

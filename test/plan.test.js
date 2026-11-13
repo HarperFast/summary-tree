@@ -193,6 +193,18 @@ test('incremental: a new member below the threshold keeps text; a removed, revis
 		newId,
 	});
 	assert.ok(revised.nodes.find((n) => n.id === leafOf.get(victim.id)).regenerate, 'so does a revised one');
+	const rewritten = await planPartition({
+		members: [{ ...victim, hash: 'other-text' }, ...rest],
+		nodes: existing,
+		clusteredSize: 24,
+		revoked: new Set(),
+		settings,
+		newId,
+	});
+	assert.ok(
+		rewritten.nodes.find((n) => n.id === leafOf.get(victim.id)).regenerate,
+		'and different text at the same revision',
+	);
 
 	const revoked = await planPartition({
 		members: rest,

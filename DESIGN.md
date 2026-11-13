@@ -18,9 +18,9 @@ cost and endpoints are in [README.md](README.md).
   no member-row writer holds a `Memory` lock, so there is no cycle.
 - **A member row keeps its `partition`, `status` and `flagged` after the memory becomes ineligible**: a later change
   needs them to know which partition to revoke.
-- **The runner summarizes a memory only at the revision its member row records** (`Runner.rebuildPartition`). A
-  memory `getMemories` returns at another revision, or no longer eligible, changed after its member row was written;
-  its own change row is pending and the next pass handles it.
+- **The runner summarizes a memory only in the state its member row records**: revision and `contentHash`
+  (`Runner.rebuildPartition`). A newer state that `getMemories` returns committed together with its member row, so
+  the runner re-reads that row; if it still disagrees, the memory waits for its own pending change.
 
 ## Visibility
 
@@ -39,24 +39,26 @@ cost and endpoints are in [README.md](README.md).
 
 ## Rebuilds
 
-- **A partition's changes are read before its members, and deleted only in the transaction that publishes every node
-  they require** (`Runner.rebuildPartition`). A change committed after the member read is not deleted, so it keeps a
-  revoked partition hidden until the next pass rebuilds from member state that includes it. A failed model call or a
-  lost lease publishes nothing and deletes nothing.
+- **A partition's changes are read before its members, and deleted last**, in their own lease-fenced transaction
+  after the nodes they require are published and the leaf assignments written (`Runner.rebuildPartition`). A change
+  committed after the member read is not deleted, so it keeps a revoked partition hidden until the next pass rebuilds
+  from member state that includes it. A failure or crash at any step leaves the changes, so the partition stays
+  hidden if they revoke, and the next pass repeats the work.
 - **`sourceIds` is a node's text provenance**: every memory its summary was derived from, directly or through
   children, as of its last summarization. A node that keeps its text keeps its `sourceIds`. Any node whose
   `sourceIds` include a revoked memory is re-summarized (`builtFromRevoked`, `src/plan.ts`), at any level, whatever
   the current assignments say.
-- **Text never outlives its sources.** A leaf whose `builtFrom` names a memory that is no longer an eligible member at
-  that revision is re-summarized (`leafNode`, `src/plan.ts`); only members that joined wait for
+- **Text never outlives its sources.** A leaf whose `builtFrom` names a memory that is no longer an eligible member in
+  that state (`memberRef`: id, revision, content hash) is re-summarized (`leafNode`, `src/plan.ts`); only members that joined wait for
   `max(dirtyMin, dirtyFraction × size)` (`membershipDelta`). Interior nodes are re-summarized whenever a child is or
   their child set changes.
 - **Ids are stable**: a re-cluster pairs each new group with the old node sharing most members (`matchByOverlap`).
 - **One runner at a time.** The lease row is read and written under the runner record lock (`lockRunner`:
-  cluster-exclusive when Harper has record-lock transport, node-exclusive otherwise, skipped on LMDB), renewed before
-  each model call, and checked under that lock inside every publish transaction (`#assertLease`). Without cluster
-  locks, two nodes can both hold the lease within replication lag, and a stale publish replicates over a newer one;
-  the `runner: false` option confines rebuilds to one node there.
+  cluster-exclusive when Harper has record-lock transport, node-exclusive otherwise), renewed before each model call,
+  and renewed through that lock inside every publish transaction (`#assertLease`), so Harper refuses a commit whose
+  lock lease expired. Without cluster locks, two nodes can both hold the lease within replication lag, and a stale
+  publish replicates over a newer one; the `runner: false` option confines rebuilds to one node there. Record locks
+  need RocksDB, as agent-memory's own lifecycle writes do.
 - **No plugin transaction holds two member locks.** The startup walk and leaf assignment take one per transaction.
   agent-memory's multi-memory operations can make the sink take several, in their order, so a second multi-lock
   holder could deadlock with it.

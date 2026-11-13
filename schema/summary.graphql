@@ -11,6 +11,7 @@ type SummaryMember @table(database: "memory") {
 	status: String
 	flagged: Boolean
 	eligible: Boolean
+	contentHash: String
 	leafId: String @indexed
 	validUntil: Date @indexed
 }

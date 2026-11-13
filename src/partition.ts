@@ -64,3 +64,11 @@ export function memberText(memory: Record<string, unknown>, maxChars: number): s
 	const end = /[\uD800-\uDBFF]/.test(text[maxChars - 1]) ? maxChars - 1 : maxChars;
 	return text.slice(0, end);
 }
+
+/** Fingerprint of the text a summary would read, so equal revisions written on two nodes can be told apart. */
+export function contentHash(memory: Record<string, unknown>): string {
+	return createHash('sha256')
+		.update(`${memory.title ?? ''}\0${memory.content ?? ''}`)
+		.digest('hex')
+		.slice(0, 16);
+}

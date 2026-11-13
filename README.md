@@ -115,8 +115,9 @@ own copy of agent-memory stops serving the memory: the change row replicates in 
 build of a 2,000-memory partition makes about 150 calls (≈ n/15 leaves plus ≈ n/150 above them).
 
 Serving cost grows with the number of summarized label sets, not with memories: bootstrap reads every top node and
-filters by label. Measured 2026-11-13 (`scripts/bench-serving.mjs`, one Harper 5.4 worker, local): bootstrap p50
-2.1 ms with 10 label sets and 6.7 ms with 1,000 (3,040 memories); search with annotations 4.1 ms and 5.4 ms.
+filters by label, then checks pending revocations only for the partitions it emits. Measured 2026-11-13
+(`scripts/bench-serving.mjs`, one Harper 5.4 worker, local): bootstrap p50 2.2 ms with 10 label sets and 8.5 ms with
+1,000 (3,040 memories; 11.4 ms for a super user who reads all 1,000); search with annotations 4.5 ms and 6.2 ms.
 
 ## Endpoints
 

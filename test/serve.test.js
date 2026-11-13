@@ -82,7 +82,6 @@ test('a pending revoking change hides its whole partition from every surface unt
 	assert.ok(!(await readableTopNodes(acmeReader)).some((n) => n.id === 'acme-1'));
 	assert.deepEqual([...(await annotateHits(acmeReader, [{ id: 'm-acme' }])).keys()], []);
 	await assert.rejects(expandNode(acmeReader, 'acme-1'), { statusCode: 404 });
-	// a non-revoking change only marks work
 	await SummaryChange.put({ id: 'c2', partition: partitionId(['customer:beta']), revoke: false, memoryId: 'm-y' });
 	assert.ok((await readableTopNodes(admin)).some((n) => n.id === 'beta-1'));
 });

@@ -4,6 +4,8 @@ import type { Settings } from './settings.ts';
 export interface PlanMember {
 	readonly id: string;
 	readonly revision: number;
+	/** `contentHash` of the text summarized, so equal revisions with different text differ */
+	readonly hash?: string;
 	readonly vector: Float32Array;
 	readonly leafId: string | null;
 }
@@ -64,8 +66,8 @@ export interface PlanInput {
 	newId: () => string;
 }
 
-export function memberRef(member: Pick<PlanMember, 'id' | 'revision'>): string {
-	return `${member.id}@${member.revision}`;
+export function memberRef(member: Pick<PlanMember, 'id' | 'revision' | 'hash'>): string {
+	return member.hash ? `${member.id}@${member.revision}:${member.hash}` : `${member.id}@${member.revision}`;
 }
 
 function refId(ref: string): string {
@@ -253,7 +255,7 @@ function incremental(input: PlanInput, byId: Map<string, ExistingNode>): Planned
 	return [...planned.values()];
 }
 
-/** Decides a partition's next tree shape and which nodes need a model call; makes no writes. */
+/** Makes no writes. */
 export async function planPartition(input: PlanInput): Promise<Plan> {
 	const { members, nodes, settings } = input;
 	const byId = new Map(nodes.map((node) => [node.id, node]));

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { databases } from 'harper';
-import { isEligible, partitionId, partitionLabels, revokesFrom } from './partition.ts';
+import { contentHash, isEligible, partitionId, partitionLabels, revokesFrom } from './partition.ts';
 
 export interface Tables {
 	SummaryMember: any;
@@ -17,13 +17,8 @@ export function summaryTables(): Tables {
 	return memory as Tables;
 }
 
-/** A node-scoped lock on `id` in `context`'s transaction; LMDB has no record locks, so it is skipped there (501). */
 export async function lockRow(table: any, id: string, context: object): Promise<void> {
-	try {
-		await table.lock(id, { scope: 'node' }, context);
-	} catch (error: any) {
-		if (error?.statusCode !== 501) throw error;
-	}
+	await table.lock(id, { scope: 'node' }, context);
 }
 
 export interface RecordOptions {
@@ -49,6 +44,7 @@ export async function recordMemory(
 	const eligible = isEligible(memory, options.now);
 	const status = typeof memory.status === 'string' ? memory.status : null;
 	const flagged = memory.contentFlag !== undefined && memory.contentFlag !== null;
+	const hash = contentHash(memory);
 	if (options.onlyIfNewer && previous) {
 		const stored = previous.revision ?? 0;
 		// Writes on two nodes can share a revision, so an equal revision counts as recorded only in the same state.
@@ -58,6 +54,7 @@ export async function recordMemory(
 			previous.status === status &&
 			Boolean(previous.flagged) === flagged &&
 			Boolean(previous.eligible) === eligible &&
+			previous.contentHash === hash &&
 			(previous.validUntil ? new Date(previous.validUntil).getTime() : null) === validUntil;
 		if (stored > revision || (stored === revision && same)) return false;
 	}
@@ -72,6 +69,7 @@ export async function recordMemory(
 			status,
 			flagged,
 			eligible,
+			contentHash: hash,
 			leafId: eligible && previous?.partition === partition ? (previous.leafId ?? null) : null,
 			validUntil: eligible && memory.validUntil ? new Date(memory.validUntil as string) : null,
 		},

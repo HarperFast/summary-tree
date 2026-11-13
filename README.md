@@ -161,6 +161,13 @@ npm run test:integration # packs the plugin, runs agent-memory and this plugin a
 npm run eval:orientation # needs local models; see the script's header
 ```
 
-The integration fixtures install the agent-memory version this checkout has in `node_modules` (or `AGENT_MEMORY_TARBALL`).
+The integration fixtures install the agent-memory version this checkout has in `node_modules` (or `AGENT_MEMORY_TARBALL`). To test an already-packed plugin instead of the checkout, run `node scripts/install-fixtures.js <tarball>` and then `npm run test:integration:run`, which runs the suite without rebuilding or repacking.
+
+## Releasing
+
+Publishing a GitHub release tagged `v<package.json version>` runs `.github/workflows/release.yml`: it tests the packed tarball, then publishes it to npm with provenance (`next` for a prerelease version, otherwise `latest`). Publish releases one at a time, in version order. Auth is npm trusted publishing, which needs one-time setup:
+
+1. A `Release` environment in the repository settings (the publish job runs in it; add required reviewers there to gate publishing).
+2. A trusted publisher on the npm package: repository `HarperFast/summary-tree`, workflow `release.yml`, environment `Release`, with direct `npm publish` allowed (npm allows only `npm stage publish` by default). npm only offers this on a package that already exists, and expires a configuration whose first publish does not succeed within 2 days, so add it shortly before the next release.
 
 See [DESIGN.md](DESIGN.md) for the invariants the code relies on.

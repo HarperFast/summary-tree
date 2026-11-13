@@ -50,21 +50,21 @@ beforeEach(async () => {
 
 test('a caller sees exactly the top nodes canReadLabels allows, largest first', async () => {
 	assert.deepEqual(
-		(await readableTopNodes(acmeReader)).map((n) => n.id),
+		(await readableTopNodes(acmeReader)).nodes.map((n) => n.id),
 		['global-1', 'acme-1', 'acme-beta-1'],
 	);
 	assert.deepEqual(
-		(await readableTopNodes(globalReader)).map((n) => n.id),
+		(await readableTopNodes(globalReader)).nodes.map((n) => n.id),
 		['global-1'],
 	);
 	assert.deepEqual(
-		(await readableTopNodes(admin)).map((n) => n.id),
+		(await readableTopNodes(admin)).nodes.map((n) => n.id),
 		['global-1', 'beta-1', 'acme-1', 'acme-beta-1'],
 	);
 });
 
 test("a reader of one customer label never sees another customer's partition", async () => {
-	const ids = (await readableTopNodes(acmeReader)).map((n) => n.id);
+	const ids = (await readableTopNodes(acmeReader)).nodes.map((n) => n.id);
 	assert.ok(!ids.includes('beta-1'));
 	assert.notEqual(partitionId(['customer:acme']), partitionId(['customer:beta']));
 	await assert.rejects(expandNode(acmeReader, 'beta-1'), { statusCode: 404 });
@@ -74,11 +74,11 @@ test("a reader of one customer label never sees another customer's partition", a
 
 test('a pending revoking change hides its whole partition from every surface until absorbed', async () => {
 	await SummaryChange.put({ id: 'c1', partition: partitionId(['customer:acme']), revoke: true, memoryId: 'm-x' });
-	assert.ok(!(await readableTopNodes(acmeReader)).some((n) => n.id === 'acme-1'));
+	assert.ok(!(await readableTopNodes(acmeReader)).nodes.some((n) => n.id === 'acme-1'));
 	assert.deepEqual([...(await annotateHits(acmeReader, [{ id: 'm-acme' }])).keys()], []);
 	await assert.rejects(expandNode(acmeReader, 'acme-1'), { statusCode: 404 });
 	await SummaryChange.put({ id: 'c2', partition: partitionId(['customer:beta']), revoke: false, memoryId: 'm-y' });
-	assert.ok((await readableTopNodes(admin)).some((n) => n.id === 'beta-1'));
+	assert.ok((await readableTopNodes(admin)).nodes.some((n) => n.id === 'beta-1'));
 });
 
 test('orientation fills the budget breadth first: top nodes largest first, then their children', async () => {
@@ -122,11 +122,11 @@ test('barriers are probed per partition', async () => {
 		await SummaryChange.put({ id: `other-${i}`, partition: `p${i}`, revoke: true, memoryId: `m${i}` });
 	}
 	assert.deepEqual(
-		(await readableTopNodes(acmeReader)).map((n) => n.id),
+		(await readableTopNodes(acmeReader)).nodes.map((n) => n.id),
 		['global-1', 'acme-1', 'acme-beta-1'],
 	);
 	await SummaryChange.put({ id: 'acme-r', partition: partitionId(['customer:acme']), revoke: true, memoryId: 'm-x' });
-	assert.ok(!(await readableTopNodes(acmeReader)).some((n) => n.id === 'acme-1'));
+	assert.ok(!(await readableTopNodes(acmeReader)).nodes.some((n) => n.id === 'acme-1'));
 	await assert.rejects(expandNode(acmeReader, 'acme-1'), { statusCode: 404 });
 });
 
@@ -135,6 +135,6 @@ test("a burst of revocations in other partitions never hides a reader's healthy 
 		await SummaryChange.put({ id: `other-${i}`, partition: `p${i}`, revoke: true, memoryId: `m${i}` });
 		await node(`n${i}`, [`team:t${i}`], { memberCount: 100 + i });
 	}
-	const served = await readableTopNodes(admin);
+	const served = (await readableTopNodes(admin)).nodes;
 	assert.equal(served.length, 74, 'every healthy partition is served');
 });

@@ -130,7 +130,7 @@ embedding model and with the runner rebuilding during the run; a real embedding 
 
 ## Endpoints
 
-- `GET /SummaryTree/` → `{ nodes: [...top nodes the caller can read], pending }`. `pending` is true while a readable
+- `GET /SummaryTree/` → `{ nodes: [...top nodes the caller can read, largest first, at most 200], truncated, pending }`. `pending` is true while a readable
   partition has changes not yet applied; it reads at most 1,000 pending changes, so behind a larger backlog it can be
   false early.
 - `GET /SummaryTree/<id>` → `{ node, children }` for a node with subtopics, `{ node, members: [{ id, title }] }` for a

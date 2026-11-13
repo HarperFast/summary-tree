@@ -110,12 +110,16 @@ function view(node: any): NodeView {
 	};
 }
 
-export function readableTopNodes(principal: Principal): Promise<NodeView[]> {
+const MAX_LISTED = 200;
+
+/** Readable top nodes, largest first; at most MAX_LISTED are checked and returned. */
+export function readableTopNodes(principal: Principal): Promise<{ nodes: NodeView[]; truncated: boolean }> {
 	return inSnapshot(async (barriers) => {
 		const tops = (await metaSearch([{ attribute: 'top', value: true }], barriers.txn))
 			.filter(readableMeta(principal))
 			.sort(bySize);
-		return (await barriers.readAll(tops, principal)).map(view);
+		const nodes = (await barriers.readAll(tops.slice(0, MAX_LISTED), principal)).map(view);
+		return { nodes, truncated: tops.length > MAX_LISTED };
 	});
 }
 
@@ -164,7 +168,6 @@ async function orientationIn(barriers: Barriers, principal: Principal, budgetCha
 		const next: any[] = [];
 		for (const meta of level) {
 			if (items.length >= MAX_ORIENTATION_ITEMS || attempts >= MAX_ORIENTATION_ATTEMPTS) break;
-			// the size check needs no text, so a node that cannot fit costs no probe and no read
 			if ((meta.textChars ?? 0) + itemSuffix(meta).length > remaining) continue;
 			attempts++;
 			const node = await barriers.read(meta, principal);

@@ -113,7 +113,7 @@ test('a failed rebuild keeps its revoking changes, so the partition stays hidden
 	await write(memory(3, { status: 'withdrawn', revision: 2 }));
 	await runner.tick();
 	assert.ok(rows('SummaryChange').some((change) => change.revoke));
-	assert.deepEqual(await readableTopNodes(acmeReader), []);
+	assert.deepEqual((await readableTopNodes(acmeReader)).nodes, []);
 	assert.equal(rows('SummaryNode')[0].sourceIds.includes(memory(3).id), true, 'old text kept but not served');
 });
 
@@ -193,7 +193,7 @@ test('a memory moved to another label set on another node revokes the partition 
 		rows('SummaryChange').some((change) => change.partition === ACME && change.revoke),
 		'the revoke lands even though the rebuild failed',
 	);
-	assert.deepEqual(await readableTopNodes(acmeReader), []);
+	assert.deepEqual((await readableTopNodes(acmeReader)).nodes, []);
 	modelState.generate = undefined;
 	await runner.tick();
 	await until('customer:acme to be rebuilt without the moved memory', async () => {

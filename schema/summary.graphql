@@ -1,8 +1,8 @@
 # In agent-memory's `memory` database, so a sink's writes commit or roll back with the memory and replicate with it.
 # Not exported: every read goes through the plugin's routes, which authorize with agent-memory's principal.
 
-# One row per memory the sink or the startup walk has seen: the assignment that lets a later change find the old
-# partition and leaf. It holds no memory text; the runner reads that from agent-memory with getMemories.
+# Written only by the sink and the startup walk: the partition a memory was last in, so a later change can revoke it.
+# No memory text; the runner reads that from agent-memory with getMemories.
 type SummaryMember @table(database: "memory") {
 	id: ID @primaryKey
 	partition: String @indexed

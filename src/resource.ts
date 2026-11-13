@@ -30,7 +30,7 @@ async function answer(context: any, target: { id?: string }): Promise<unknown> {
 	const principal: Principal = await agentMemory.resolvePrincipal(context);
 	if (!state.ready) throw notReady();
 	if (target.id === undefined || target.id === '') {
-		return { nodes: await readableTopNodes(principal), pending: await hasPendingWork(principal) };
+		return { ...(await readableTopNodes(principal)), pending: await hasPendingWork(principal) };
 	}
 	return expandNode(principal, target.id);
 }

@@ -181,6 +181,7 @@ export class Runner {
 			if (await this.#hasWork()) this.schedule(this.settings.debounceMs);
 			else await this.#armExpiry();
 		} catch (error) {
+			if (this.#stopped) return;
 			this.#backoff = Math.min(MAX_BACKOFF_MS, Math.max(this.settings.debounceMs, 5_000, this.#backoff * 2));
 			this.#log.error?.(`@harperfast/summary-tree: maintenance failed; retrying in ${this.#backoff} ms`, error);
 			this.schedule(this.#backoff);
@@ -248,12 +249,6 @@ export class Runner {
 		const state = await SummaryState.get(RUNNER_ID, txn);
 		if (state?.leaseHolder !== this.holderId || !(state.leaseUntil > Date.now())) throw new LeaseLostError();
 		await SummaryState.put({ ...state, leaseUntil: Date.now() + this.settings.leaseMs }, txn);
-	}
-
-	/** Without the runner lock: assignments decide only which leaf a hit is annotated with and expand lists it under. */
-	async #checkLease(txn: object): Promise<void> {
-		const state = await summaryTables().SummaryState.get(RUNNER_ID, txn);
-		if (state?.leaseHolder !== this.holderId || !(state.leaseUntil > Date.now())) throw new LeaseLostError();
 	}
 
 	async #releaseLease(): Promise<void> {
@@ -443,7 +438,7 @@ export class Runner {
 		for (const update of updates) {
 			if (this.#stopped) throw new LeaseLostError();
 			await transaction(async (txn: object) => {
-				await this.#checkLease(txn);
+				await this.#assertLease(txn);
 				await lockRow(SummaryMember, update.id, txn);
 				const stored = await SummaryMember.get(update.id, txn);
 				if (!stored || stored.partition !== partition) return;

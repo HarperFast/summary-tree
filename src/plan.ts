@@ -75,7 +75,6 @@ function refId(ref: string): string {
 	return at < 0 ? ref : ref.slice(0, at);
 }
 
-/** Members whose presence or revision differs between two builtFrom lists. */
 export function membershipDelta(before: readonly string[], after: readonly string[]): number {
 	const previous = new Map(before.map((ref) => [refId(ref), ref]));
 	let delta = 0;
@@ -255,7 +254,6 @@ function incremental(input: PlanInput, byId: Map<string, ExistingNode>): Planned
 	return [...planned.values()];
 }
 
-/** Makes no writes. */
 export async function planPartition(input: PlanInput): Promise<Plan> {
 	const { members, nodes, settings } = input;
 	const byId = new Map(nodes.map((node) => [node.id, node]));

@@ -18,9 +18,9 @@ cost and endpoints are in [README.md](README.md).
   no member-row writer holds a `Memory` lock, so there is no cycle.
 - **A member row keeps its `partition`, `status` and `flagged` after the memory becomes ineligible**: a later change
   needs them to know which partition to revoke.
-- **The runner summarizes a memory only in the state its member row records**: revision and `contentHash`
-  (`Runner.rebuildPartition`). A newer state that `getMemories` returns committed together with its member row, so
-  the runner re-reads that row; if it still disagrees, the memory waits for its own pending change.
+- **The runner summarizes a memory only in a state at or behind its member row** (revision and `contentHash`,
+  `Runner.rebuildPartition`). A newer state that `getMemories` returns committed together with its member row, so the
+  runner re-reads that row; when the row is ahead, its pending change rebuilds what this pass builds.
 
 ## Visibility
 

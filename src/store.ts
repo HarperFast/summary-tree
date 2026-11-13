@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { databases } from 'harper';
+import * as agentMemory from '@harperfast/agent-memory';
 import { contentHash, isEligible, partitionId, partitionLabels, revokesFrom } from './partition.ts';
 
 export interface Tables {
@@ -23,21 +24,27 @@ export async function lockRow(table: any, id: string, context: object): Promise<
 
 export interface RecordOptions {
 	now: number;
-	/** the startup walk: skip a memory already recorded at a later revision, or at this one in the same state */
+	/** startup walk */
 	onlyIfNewer?: boolean;
 }
 
 /** Makes no model call: the sink runs it inside agent-memory's lifecycle transaction. */
 export async function recordMemory(
-	memory: Record<string, unknown>,
+	scanned: Record<string, unknown>,
 	context: object,
 	options: RecordOptions,
 ): Promise<boolean> {
-	const id = memory.id;
+	const id = scanned.id;
 	if (typeof id !== 'string') return false;
 	const { SummaryMember, SummaryChange } = summaryTables();
 	await lockRow(SummaryMember, id, context);
 	const previous = await SummaryMember.get(id, context);
+	let memory = scanned;
+	// Two nodes can write one revision, and the other node's write may have replicated in after the walk read this
+	// row; under the member lock, the current row decides.
+	if (options.onlyIfNewer && previous?.revision === scanned.revision) {
+		memory = (await agentMemory.getMemories([id]))[0] ?? scanned;
+	}
 	const revision = typeof memory.revision === 'number' ? memory.revision : 0;
 	const labels = partitionLabels(memory.scopes);
 	const partition = partitionId(labels);

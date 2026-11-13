@@ -45,11 +45,11 @@
 		"orientation"
 	],
 	"peerDependencies": {
-		"@harperfast/agent-memory": ">=0.1.5-0 <0.2.0",
+		"@harperfast/agent-memory": ">=0.1.5 <0.2.0",
 		"harper": "^5.3.1"
 	},
 	"devDependencies": {
-		"@harperfast/agent-memory": "file:vendor/harperfast-agent-memory-0.1.5-pre.fa429d7.tgz",
+		"@harperfast/agent-memory": "^0.1.5",
 		"@harperfast/integration-testing": "1.0.5",
 		"@types/node": "^22.0.0",
 		"harper": "^5.4.0",

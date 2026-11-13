@@ -150,8 +150,6 @@ npm run test:integration # packs the plugin, runs agent-memory and this plugin a
 npm run eval:orientation # needs local models; see the script's header
 ```
 
-Until agent-memory 0.1.5 is published, `vendor/` holds a package built from its pending `getMemories` branch (on top
-of the main-branch commit that added `scanMemories`, bootstrap sections and search annotators), used for development
-and the integration fixtures. Replace it with `^0.1.5` once released.
+The integration fixtures install the agent-memory version this checkout has in `node_modules` (or `AGENT_MEMORY_TARBALL`).
 
 See [DESIGN.md](DESIGN.md) for the invariants the code relies on.

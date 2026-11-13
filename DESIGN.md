@@ -31,8 +31,10 @@ cost and endpoints are in [README.md](README.md).
   when the memory was withdrawn, newly content-flagged, or moved to another label set, judged against the stored
   member, not its eligibility (`revokesFrom`): a summary may still carry text from a member that became ineligible
   for another reason, and the later withdrawal must still revoke.
-- **Barriers are checked before the text they guard** (`Barriers.read`, `src/serve.ts`): serving reads node metadata
-  without text, checks the partition's barrier, then reads the node. The check is one query for every pending revoke
+- **Each serving request reads in one snapshot** (`inSnapshot`, `src/serve.ts`): Harper gives every read in one
+  transaction on one database a consistent snapshot, so a request's barrier decisions and the summary text it returns
+  are one point in time. Within it, serving reads node metadata without text, checks the partition's barrier
+  (`Barriers.read`), then reads the node. The check is one query for every pending revoke
   while at most 64 are pending, else an indexed probe (`partition`, `revoke`) per partition, at most 64 per request;
   partitions past that are treated as hidden.
 - **Hiding is replica-local, like agent-memory's own reads.** The change row is written in the memory's transaction

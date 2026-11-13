@@ -34,6 +34,12 @@ whose `node_modules` also holds agent-memory:
 It needs a generative model and an embedding model in Harper's `models:` configuration. Its tables live in
 agent-memory's `memory` database and replicate with it.
 
+**Multi-node clusters** need Harper's record-lock replication and agent-memory's `lockScope: cluster`. agent-memory
+calls the plugin's sink only on the node that makes a change. Under node-scoped locks, two nodes can change one memory
+at once, for example moving it to two different label sets. Summary text can then stay in the partition it left until
+replication lands and the runner's next pass revokes that partition. Without record-lock replication, also set
+`runner: false` on every node but one. The plugin cannot read agent-memory's `lockScope`, so it cannot enforce this.
+
 ## Configuration
 
 Options go under the `'@harperfast/summary-tree'` key. A malformed change is logged and the previous configuration

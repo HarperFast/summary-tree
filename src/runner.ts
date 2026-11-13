@@ -320,6 +320,10 @@ export class Runner {
 				stored.revision > (memory.revision as number) ||
 				(stored.revision === memory.revision && stored.contentHash === contentHash(memory));
 			if (caughtUp) recorded.set(memory.id as string, stateOf(memory));
+			// another node's write at the same revision: building now would drop the memory with no change left to add it
+			else if (stored.revision === memory.revision) {
+				throw new Error(`@harperfast/summary-tree: memory ${memory.id} changed during the rebuild; retrying`);
+			}
 		}
 		const eligible = current.filter((memory) => stateOf(memory) === recorded.get(memory.id as string));
 		const textOf = new Map<string, string>(

@@ -90,7 +90,6 @@ export function parseSettings(options: Record<string, unknown>): Settings {
 	return Object.freeze(settings) as unknown as Settings;
 }
 
-/** The character budget for the member or child text of one summarization prompt. */
 export function promptInputChars(settings: Settings): number {
 	const overheadTokens = 400;
 	return Math.max(

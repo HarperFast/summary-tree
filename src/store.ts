@@ -24,7 +24,6 @@ export async function lockRow(table: any, id: string, context: object): Promise<
 
 export interface RecordOptions {
 	now: number;
-	/** startup walk */
 	onlyIfNewer?: boolean;
 }
 
@@ -39,11 +38,19 @@ export async function recordMemory(
 	const { SummaryMember, SummaryChange } = summaryTables();
 	await lockRow(SummaryMember, id, context);
 	const previous = await SummaryMember.get(id, context);
-	let memory = scanned;
-	// Two nodes can write one revision, and the other node's write may have replicated in after the walk read this
-	// row; under the member lock, the current row decides.
-	if (options.onlyIfNewer && previous?.revision === scanned.revision) {
-		memory = (await agentMemory.getMemories([id]))[0] ?? scanned;
+	if (options.onlyIfNewer && previous) {
+		const stored = previous.revision ?? 0;
+		const revision = typeof scanned.revision === 'number' ? scanned.revision : 0;
+		if (stored > revision || (stored === revision && sameState(previous, scanned, options.now))) return false;
+	}
+	// Two nodes can write one revision, and the other's write may have replicated in after the walk read this row:
+	// under the member lock, the current row decides.
+	const memory =
+		options.onlyIfNewer && previous?.revision === scanned.revision
+			? ((await agentMemory.getMemories([id]))[0] ?? scanned)
+			: scanned;
+	if (memory !== scanned && previous?.revision === memory.revision && sameState(previous, memory, options.now)) {
+		return false;
 	}
 	const revision = typeof memory.revision === 'number' ? memory.revision : 0;
 	const labels = partitionLabels(memory.scopes);
@@ -52,19 +59,6 @@ export async function recordMemory(
 	const status = typeof memory.status === 'string' ? memory.status : null;
 	const flagged = memory.contentFlag !== undefined && memory.contentFlag !== null;
 	const hash = contentHash(memory);
-	if (options.onlyIfNewer && previous) {
-		const stored = previous.revision ?? 0;
-		// Writes on two nodes can share a revision, so an equal revision counts as recorded only in the same state.
-		const validUntil = eligible && memory.validUntil ? new Date(memory.validUntil as string).getTime() : null;
-		const same =
-			previous.partition === partition &&
-			previous.status === status &&
-			Boolean(previous.flagged) === flagged &&
-			Boolean(previous.eligible) === eligible &&
-			previous.contentHash === hash &&
-			(previous.validUntil ? new Date(previous.validUntil).getTime() : null) === validUntil;
-		if (stored > revision || (stored === revision && same)) return false;
-	}
 	const revoke = revokesFrom(previous ?? undefined, memory, partition);
 
 	await SummaryMember.put(
@@ -103,4 +97,17 @@ export async function recordMemory(
 		await append(partition, labels, revoke);
 	}
 	return true;
+}
+
+function sameState(previous: any, memory: Record<string, unknown>, now: number): boolean {
+	const eligible = isEligible(memory, now);
+	const validUntil = eligible && memory.validUntil ? new Date(memory.validUntil as string).getTime() : null;
+	return (
+		previous.partition === partitionId(partitionLabels(memory.scopes)) &&
+		previous.status === (typeof memory.status === 'string' ? memory.status : null) &&
+		Boolean(previous.flagged) === (memory.contentFlag !== undefined && memory.contentFlag !== null) &&
+		Boolean(previous.eligible) === eligible &&
+		previous.contentHash === contentHash(memory) &&
+		(previous.validUntil ? new Date(previous.validUntil).getTime() : null) === validUntil
+	);
 }

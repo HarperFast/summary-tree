@@ -23,42 +23,26 @@ async function collect<T = any>(iterable: any): Promise<T[]> {
 	return rows;
 }
 
-const BARRIER_PREFETCH = 200;
+const BARRIER_SCAN_LIMIT = 10_000;
 
 /**
- * Pending revoking changes for one request: read in one query while there are at most BARRIER_PREFETCH of them,
- * else looked up per partition and memoized.
+ * Partitions hidden by a pending revoking change, read once per request. A backlog past BARRIER_SCAN_LIMIT hides
+ * every partition rather than costing a query per partition.
  */
 export class Barriers {
-	#known: Promise<Set<string> | undefined> | undefined;
-	#blocked = new Map<string, Promise<boolean>>();
+	#blocked: Promise<Set<string> | 'all'> | undefined;
 
 	async isBlocked(partition: string): Promise<boolean> {
 		const { SummaryChange } = summaryTables();
-		this.#known ??= collect(
+		this.#blocked ??= collect(
 			SummaryChange.search({
 				conditions: [{ attribute: 'revoke', value: true }],
 				select: ['partition'],
-				limit: BARRIER_PREFETCH + 1,
+				limit: BARRIER_SCAN_LIMIT + 1,
 			}),
-		).then((rows) => (rows.length > BARRIER_PREFETCH ? undefined : new Set(rows.map((row) => row.partition))));
-		const known = await this.#known;
-		if (known) return known.has(partition);
-		let blocked = this.#blocked.get(partition);
-		if (blocked === undefined) {
-			blocked = collect(
-				SummaryChange.search({
-					conditions: [
-						{ attribute: 'partition', value: partition },
-						{ attribute: 'revoke', value: true },
-					],
-					select: ['id'],
-					limit: 1,
-				}),
-			).then((rows) => rows.length > 0);
-			this.#blocked.set(partition, blocked);
-		}
-		return blocked;
+		).then((rows) => (rows.length > BARRIER_SCAN_LIMIT ? 'all' : new Set(rows.map((row) => row.partition))));
+		const blocked = await this.#blocked;
+		return blocked === 'all' || blocked.has(partition);
 	}
 }
 

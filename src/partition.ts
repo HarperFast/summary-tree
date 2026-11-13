@@ -26,7 +26,6 @@ export function isExpired(validUntil: unknown, now: number): boolean {
 	return !Number.isNaN(time) && time <= now;
 }
 
-/** Whether a memory's text may be summarized: active, unexpired, not awaiting review, not content-flagged. */
 export function isEligible(memory: Record<string, unknown>, now: number): boolean {
 	return (
 		memory.status === 'active' &&

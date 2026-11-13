@@ -118,3 +118,13 @@ test('the startup walk skips a memory the sink already recorded at that revision
 function resetChanges() {
 	for (const row of rows('SummaryChange')) databases.memory.SummaryChange.delete(row.id);
 }
+
+test('the startup walk records an equal revision in a different state: two nodes can share a revision', async () => {
+	await transaction((txn) => recordMemory(memory({ revision: 5 }), txn, opts));
+	resetChanges();
+	const applied = await transaction((txn) =>
+		recordMemory(memory({ revision: 5, status: 'withdrawn' }), txn, { ...opts, onlyIfNewer: true }),
+	);
+	assert.equal(applied, true);
+	assert.deepEqual(changes(), [{ partition: ACME, revoke: true, memoryId: 'mem-aaaaaaaaaaaaaaaa' }]);
+});

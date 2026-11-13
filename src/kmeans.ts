@@ -47,7 +47,6 @@ export function nearestCentroid(vec: Vector, centroids: readonly Vector[]): { in
 	return { index: best, similarity: bestSim };
 }
 
-/** Normalized mean of normalized vectors. */
 export function centroidOf(vectors: readonly Vector[]): Float32Array {
 	const dims = vectors[0].length;
 	const sum = new Float64Array(dims);

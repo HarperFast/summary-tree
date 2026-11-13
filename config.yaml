@@ -1,5 +1,4 @@
-# Plugin entry point and defaults. Every option can be overridden under the plugin's key in the host application's
-# config.yaml; see README.md, Configuration.
+# Options go under the '@harperfast/summary-tree' key of the host application's config.yaml (README.md, Configuration).
 pluginModule: 'dist/index.js'
 
 graphqlSchema:

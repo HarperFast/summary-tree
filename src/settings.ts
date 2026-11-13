@@ -1,6 +1,7 @@
 export interface Settings {
 	readonly urlPath: string;
 	readonly mcp: boolean;
+	readonly runner: boolean;
 	readonly generativeModel: string;
 	readonly embeddingModel: string;
 	readonly contextTokens: number;
@@ -22,6 +23,7 @@ export interface Settings {
 export const DEFAULT_SETTINGS: Settings = Object.freeze({
 	urlPath: 'SummaryTree',
 	mcp: false,
+	runner: true,
 	generativeModel: 'default',
 	embeddingModel: 'default',
 	contextTokens: 8192,

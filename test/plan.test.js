@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { normalize } from '../dist/kmeans.js';
-import { matchByOverlap, memberRef, membershipDelta, planPartition } from '../dist/plan.js';
+import { matchByOverlap, memberRef, membershipDelta, planPartition as planPartitionRaw } from '../dist/plan.js';
 import { DEFAULT_SETTINGS } from '../dist/settings.js';
 
 const settings = { ...DEFAULT_SETTINGS, treeMinMembers: 12, leafClusterSize: 4, fanout: 2, topFloor: 2, dirtyMin: 2 };
@@ -22,6 +22,7 @@ function members(groups, size, revision = 1, firstGroup = 0) {
 
 let counter = 0;
 const newId = () => `new-${++counter}`;
+const planPartition = (input) => planPartitionRaw({ current: new Set(input.members.map(memberRef)), ...input });
 
 function asExisting(plan, summaries = true) {
 	return plan.nodes.map((node) => ({
@@ -131,7 +132,7 @@ test('a re-cluster keeps node ids by member overlap and keeps text below the dir
 	assert.ok(second.nodes.filter((n) => n.level === 1 && !oldLeafIds.has(n.id)).every((n) => n.regenerate));
 });
 
-test('incremental: a small change keeps text; a revoked member forces every node built from it to rebuild', async () => {
+test('incremental: a new member below the threshold keeps text; a removed, revised or revoked source forces a rebuild', async () => {
 	const first = await planPartition({
 		members: members(3, 8),
 		nodes: [],
@@ -155,10 +156,9 @@ test('incremental: a small change keeps text; a revoked member forces every node
 	assert.ok(unchanged.nodes.every((n) => !n.regenerate));
 	assert.deepEqual(unchanged.deleteIds, []);
 
-	const victim = withLeaves[0];
-	const rest = withLeaves.slice(1);
+	const joined = { id: 'g0-new', revision: 1, vector: withLeaves[0].vector, leafId: null };
 	const belowThreshold = await planPartition({
-		members: rest,
+		members: [...withLeaves, joined],
 		nodes: existing,
 		clusteredSize: 24,
 		revoked: new Set(),
@@ -167,8 +167,32 @@ test('incremental: a small change keeps text; a revoked member forces every node
 	});
 	assert.ok(
 		belowThreshold.nodes.every((n) => !n.regenerate),
-		'one removal stays below dirtyMin 2',
+		'one new member stays below dirtyMin 2',
 	);
+
+	const victim = withLeaves[0];
+	const rest = withLeaves.slice(1);
+	const removed = await planPartition({
+		members: rest,
+		nodes: existing,
+		clusteredSize: 24,
+		revoked: new Set(),
+		settings,
+		newId,
+	});
+	assert.ok(
+		removed.nodes.find((n) => n.id === leafOf.get(victim.id)).regenerate,
+		'a removed source forces its leaf to rebuild: text never outlives its sources',
+	);
+	const revised = await planPartition({
+		members: [{ ...victim, revision: 2 }, ...rest],
+		nodes: existing,
+		clusteredSize: 24,
+		revoked: new Set(),
+		settings,
+		newId,
+	});
+	assert.ok(revised.nodes.find((n) => n.id === leafOf.get(victim.id)).regenerate, 'so does a revised one');
 
 	const revoked = await planPartition({
 		members: rest,

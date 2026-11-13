@@ -58,6 +58,8 @@ export interface PlanInput {
 	clusteredSize: number | null;
 	/** memories withdrawn, flagged or moved out since the last pass: every node built from one is rebuilt */
 	revoked: ReadonlySet<string>;
+	/** `memberRef` of every eligible member now; a leaf built from any other ref is rebuilt */
+	current: ReadonlySet<string>;
 	settings: PlanSettings;
 	newId: () => string;
 }
@@ -135,9 +137,12 @@ function leafNode(
 ): PlannedNode {
 	const centroid = centroidOf(members.map((member) => member.vector));
 	const ordered = byCentrality(members, (member) => member.vector, centroid);
+	// Text never outlives its sources: a member removed or revised since the summary forces a rebuild, while members
+	// that only joined wait for the dirty threshold.
 	const regenerate =
 		!existing?.summary ||
 		builtFromRevoked(existing, input.revoked) ||
+		existing.builtFrom.some((ref) => !input.current.has(ref)) ||
 		membershipDelta(existing.builtFrom, ordered.map(memberRef)) >= dirtyThreshold(members.length, input.settings);
 	return {
 		id,

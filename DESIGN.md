@@ -47,13 +47,19 @@ cost and endpoints are in [README.md](README.md).
   children, as of its last summarization. A node that keeps its text keeps its `sourceIds`. Any node whose
   `sourceIds` include a revoked memory is re-summarized (`builtFromRevoked`, `src/plan.ts`), at any level, whatever
   the current assignments say.
-- **Ids are stable**: a re-cluster pairs each new group with the old node sharing most members (`matchByOverlap`), and
-  a node keeps its text while fewer than `max(dirtyMin, dirtyFraction × size)` members changed since its `builtFrom`
-  (`membershipDelta`). Interior nodes are re-summarized whenever a child is or their child set changes.
-- **One runner at a time.** The lease row is read and written under `SummaryState.lock` (cluster-exclusive when
-  Harper has record-lock transport, node-exclusive otherwise, skipped on LMDB), renewed before each model call, and
-  checked inside every publish transaction (`#assertLease`). Without cluster locks two nodes can briefly both hold
-  it; the fence makes the loser publish nothing.
+- **Text never outlives its sources.** A leaf whose `builtFrom` names a memory that is no longer an eligible member at
+  that revision is re-summarized (`leafNode`, `src/plan.ts`); only members that joined wait for
+  `max(dirtyMin, dirtyFraction × size)` (`membershipDelta`). Interior nodes are re-summarized whenever a child is or
+  their child set changes.
+- **Ids are stable**: a re-cluster pairs each new group with the old node sharing most members (`matchByOverlap`).
+- **One runner at a time.** The lease row is read and written under the runner record lock (`lockRunner`:
+  cluster-exclusive when Harper has record-lock transport, node-exclusive otherwise, skipped on LMDB), renewed before
+  each model call, and checked under that lock inside every publish transaction (`#assertLease`). Without cluster
+  locks, two nodes can both hold the lease within replication lag, and a stale publish replicates over a newer one;
+  the `runner: false` option confines rebuilds to one node there.
+- **No plugin transaction holds two member locks.** The startup walk and leaf assignment take one per transaction.
+  agent-memory's multi-memory operations can make the sink take several, in their order, so a second multi-lock
+  holder could deadlock with it.
 - **Scheduling is event-driven**: a `SummaryChange` subscription debounces a tick; a tick with no changes and no
   expired members does nothing; the only idle timer is the next `validUntil` (`#armExpiry`). Failures back off
   exponentially while work remains.

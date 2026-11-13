@@ -13,6 +13,7 @@ const REQUIRED_EXPORTS = [
 	'registerBootstrapSection',
 	'registerSearchAnnotator',
 	'scanMemories',
+	'getMemories',
 	'resolvePrincipal',
 	'canReadLabels',
 ] as const;

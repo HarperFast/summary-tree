@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { databases, modelState, resetTables, rows, transaction } from 'harper';
+import { databases, lockCalls, modelState, resetTables, rows, transaction } from 'harper';
 import { memoryStore } from '@harperfast/agent-memory';
 import { Runner } from '../dist/runner.js';
 import { DEFAULT_SETTINGS } from '../dist/settings.js';
@@ -138,4 +138,21 @@ test('an expired member leaves its summary without any change event', async () =
 	await until('expiry to rebuild the node', async () => rows('SummaryNode')[0]?.memberCount === 4, 5_000);
 	const expired = rows('SummaryMember').find((member) => member.id === memory(5).id);
 	assert.equal(expired.eligible, false);
+});
+
+test('a worker with runner: false serves but never rebuilds', async () => {
+	for (const n of [1, 2, 3, 4]) memoryStore.set(memory(n).id, memory(n));
+	runner = new Runner({ ...settings, runner: false }, quiet);
+	runner.start();
+	await until('the startup walk', async () => runner.ready);
+	await runner.tick();
+	assert.equal(rows('SummaryNode').length, 0);
+	assert.ok(rows('SummaryChange').length > 0, 'its work waits for a runner node');
+});
+
+test('the publish transaction takes the runner lock before checking the lease', async () => {
+	await startWith([1, 2, 3, 4, 5].map((n) => memory(n)));
+	const locks = lockCalls.filter((call) => call.table === 'SummaryState' && call.id === 'runner');
+	assert.ok(locks.length >= 3, 'acquire, renew and publish');
+	assert.ok(locks.every((call) => call.inTransaction));
 });

@@ -39,26 +39,27 @@ agent-memory's `memory` database and replicate with it.
 Options go under the `'@harperfast/summary-tree'` key. A malformed change is logged and the previous configuration
 keeps running; `urlPath` and `mcp` take effect on restart.
 
-| Option             | Default       | Meaning                                                                                                   |
-| ------------------ | ------------- | --------------------------------------------------------------------------------------------------------- |
-| `generativeModel`  | `default`     | Logical generative model that writes summaries                                                            |
-| `embeddingModel`   | `default`     | Logical embedding model; a memory's stored vector is reused when agent-memory embedded it with this model |
-| `contextTokens`    | `8192`        | The generative model's context window; sizes each prompt                                                  |
-| `charsPerToken`    | `3`           | Characters per token used to turn `contextTokens` into a character budget (conservative for English)      |
-| `maxSummaryTokens` | `400`         | Output tokens requested per summary                                                                       |
-| `memberChars`      | `2000`        | Characters of each memory (title and content) available to a prompt                                       |
-| `leafClusterSize`  | `15`          | Target memories per leaf topic                                                                            |
-| `fanout`           | `10`          | Target topics per parent above the leaves                                                                 |
-| `topFloor`         | `6`           | Stop adding levels once a level has at most this many nodes                                               |
-| `treeMinMembers`   | `40`          | A label set with at least this many memories gets a clustered tree                                        |
-| `flatMinMembers`   | `3`           | A label set with at least this many (and fewer than `treeMinMembers`) gets one summary; fewer get none    |
-| `dirtyMin`         | `2`           | A node is re-summarized after at least `max(dirtyMin, dirtyFraction × size)` member changes               |
-| `dirtyFraction`    | `0.15`        | See `dirtyMin`                                                                                            |
-| `rebuildGrowth`    | `2`           | Re-cluster a tree when its label set has grown or shrunk by this factor since the last clustering         |
-| `debounceMs`       | `30000`       | Wait after a change before rebuilding, so a burst of writes costs one pass                                |
-| `leaseMs`          | `300000`      | How long the runner lease lasts between renewals                                                          |
-| `urlPath`          | `SummaryTree` | REST path of the expand endpoint                                                                          |
-| `mcp`              | `false`       | Mount the `expand_summary` MCP tool on Harper's `/mcp` endpoint (needs Harper's MCP server enabled)       |
+| Option             | Default       | Meaning                                                                                                           |
+| ------------------ | ------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `generativeModel`  | `default`     | Logical generative model that writes summaries                                                                    |
+| `embeddingModel`   | `default`     | Logical embedding model; a memory's stored vector is reused when agent-memory embedded it with this model         |
+| `contextTokens`    | `8192`        | The generative model's context window; sizes each prompt                                                          |
+| `charsPerToken`    | `3`           | Characters per token used to turn `contextTokens` into a character budget (conservative for English)              |
+| `maxSummaryTokens` | `400`         | Output tokens requested per summary                                                                               |
+| `memberChars`      | `2000`        | Characters of each memory (title and content) available to a prompt                                               |
+| `leafClusterSize`  | `15`          | Target memories per leaf topic                                                                                    |
+| `fanout`           | `10`          | Target topics per parent above the leaves                                                                         |
+| `topFloor`         | `6`           | Stop adding levels once a level has at most this many nodes                                                       |
+| `treeMinMembers`   | `40`          | A label set with at least this many memories gets a clustered tree                                                |
+| `flatMinMembers`   | `3`           | A label set with at least this many (and fewer than `treeMinMembers`) gets one summary; fewer get none            |
+| `dirtyMin`         | `2`           | A node is re-summarized after at least `max(dirtyMin, dirtyFraction × size)` member changes                       |
+| `dirtyFraction`    | `0.15`        | See `dirtyMin`                                                                                                    |
+| `rebuildGrowth`    | `2`           | Re-cluster a tree when its label set has grown or shrunk by this factor since the last clustering                 |
+| `debounceMs`       | `30000`       | Wait after a change before rebuilding, so a burst of writes costs one pass                                        |
+| `leaseMs`          | `300000`      | How long the runner lease lasts between renewals                                                                  |
+| `runner`           | `true`        | Whether this node rebuilds summaries. In a cluster without record-lock replication, leave it on for one node only |
+| `urlPath`          | `SummaryTree` | REST path of the expand endpoint                                                                                  |
+| `mcp`              | `false`       | Mount the `expand_summary` MCP tool on Harper's `/mcp` endpoint (needs Harper's MCP server enabled)               |
 
 ## Permissions
 
@@ -86,31 +87,36 @@ with pending changes, reading current memory text and vectors from agent-memory 
 
 - Below `rebuildGrowth`, new memories join the nearest existing topic and node ids stay the same. A re-cluster matches
   new topics to old ones by shared members and keeps their ids, so clients can hold on to a node id.
-- A node keeps its text, with no model call, while fewer than `max(dirtyMin, dirtyFraction × size)` of its members
-  changed. A node built from a withdrawn, flagged or moved memory is always rebuilt.
+- Summary text never outlives its sources: a node is rebuilt as soon as a memory it was built from is edited,
+  withdrawn, superseded, flagged, expired, marked for review or moved. New memories only wait: a node keeps its text,
+  with no model call, until at least `max(dirtyMin, dirtyFraction × size)` members have joined or changed.
 - Expiry (`validUntil`) has no event; the runner keeps one timer for the next expiry. Nothing runs while nothing is
   pending.
 - On startup each worker walks agent-memory's memories (`scanMemories`) to catch changes made while the plugin was not
   loaded, and serves nothing until that walk finishes.
 
-One worker in the cluster runs the rebuilds at a time, under a lease. With Harper's record-lock replication
-configured, taking the lease is cluster-exclusive; otherwise replication lag can let two nodes briefly run at once,
-which costs duplicate model calls but not correctness, since every publish checks the lease. Each node stops serving a
-hidden partition exactly when its own copy of agent-memory stops serving the memory: the change row replicates in the
-same transaction as the memory.
+One worker runs the rebuilds at a time, under a lease checked again, under the runner's record lock, inside every
+publish transaction. With Harper's record-lock replication configured that lock is cluster-wide. **Without it, set
+`runner: false` on every node but one**: two nodes could otherwise both hold the lease within replication lag, and a
+publish from stale state can replicate over a newer one. Each node stops serving a hidden partition exactly when its
+own copy of agent-memory stops serving the memory: the change row replicates in the same transaction as the memory.
 
 ## Cost
 
-| Event                       | Model calls                                                                                   |
-| --------------------------- | --------------------------------------------------------------------------------------------- |
-| Any memory write            | none in the write path                                                                        |
-| New or edited memory        | a summary once its leaf is dirty; no embedding while `embeddingModel` matches agent-memory's  |
-| Leaf crosses its dirty mark | one summary for the leaf, plus one per ancestor level (at most 2 for a few thousand memories) |
-| Withdraw / flag / move      | one summary per node that was built from that memory                                          |
-| Re-cluster (size ×2 or ÷2)  | one per new or changed topic; topics that kept their members keep their text                  |
+| Event                                                                               | Model calls                                                                                   |
+| ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Any memory write                                                                    | none in the write path                                                                        |
+| New memory                                                                          | none until its leaf is dirty; no embedding while `embeddingModel` matches agent-memory's      |
+| Leaf crosses its dirty mark                                                         | one summary for the leaf, plus one per ancestor level (at most 2 for a few thousand memories) |
+| Edit, withdraw, supersede, flag, expiry, review flag or move of a summarized memory | one summary for its leaf plus one per ancestor level                                          |
+| Re-cluster (size ×2 or ÷2)                                                          | one per new or changed topic; topics that kept their members keep their text                  |
 
-With the defaults, a 15-memory leaf is re-summarized about once per 2–3 member changes. The first build of a
-2,000-memory partition makes about 150 calls (≈ n/15 leaves plus ≈ n/150 above them).
+`debounceMs` batches these: several changes to one leaf inside the window cost one call per affected node. The first
+build of a 2,000-memory partition makes about 150 calls (≈ n/15 leaves plus ≈ n/150 above them).
+
+Serving cost grows with the number of summarized label sets, not with memories: bootstrap reads every top node and
+filters by label. Measured 2026-11-13 (`scripts/bench-serving.mjs`, one Harper 5.4 worker, local): bootstrap p50
+2.1 ms with 10 label sets and 6.7 ms with 1,000 (3,040 memories); search with annotations 4.1 ms and 5.4 ms.
 
 ## Endpoints
 

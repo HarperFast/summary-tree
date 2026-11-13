@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { threadId } from 'node:worker_threads';
 import { models, transaction } from 'harper';
-import { getMemories, scanMemories } from '@harperfast/agent-memory';
+import * as agentMemory from '@harperfast/agent-memory';
 import { normalize, type Vector } from './kmeans.ts';
 import { isEligible, isExpired, memberText, partitionId, partitionLabels } from './partition.ts';
 import { memberRef, planPartition, type ExistingNode, type PlanMember } from './plan.ts';
@@ -11,8 +11,8 @@ import { lockRow, recordMemory, summaryTables } from './store.ts';
 import { summarize } from './summarize.ts';
 
 const RUNNER_ID = 'runner';
-const SCAN_BATCH = 100;
 const EMBED_BATCH = 32;
+const VECTOR_CACHE_LIMIT = 50_000;
 const MAX_BACKOFF_MS = 30 * 60_000;
 // setTimeout's ceiling; a later expiry is re-armed when this fires
 const MAX_TIMER_MS = 2 ** 31 - 1;
@@ -37,11 +37,7 @@ async function collect<T>(iterable: AsyncIterable<T> | Iterable<T> | Promise<Asy
 	return rows;
 }
 
-/**
- * Debounced, dirty-only maintenance of every partition's tree, run by one leaseholder at a time. Everything it
- * learns about memories arrives through `SummaryMember` and `SummaryChange`, which the sink and the startup walk
- * write; it never reads agent-memory's tables.
- */
+/** Debounced, dirty-only maintenance of every partition's tree, run by one leaseholder at a time. */
 export class Runner {
 	settings: Settings;
 	readonly holderId = `${hostname()}:${process.pid}:${threadId}:${randomUUID().slice(0, 8)}`;
@@ -53,9 +49,10 @@ export class Runner {
 	#timerAt = Infinity;
 	#expiryTimer: NodeJS.Timeout | undefined;
 	#backoff = 0;
+	#rerun = false;
 	#subscription: AsyncIterator<unknown> | undefined;
-	/** model calls made by this worker, for tests and logs */
-	modelCalls = 0;
+	// vectors embedded here for memories agent-memory embedded with another model, by `id@revision`
+	#vectorCache = new Map<string, Vector>();
 
 	constructor(settings: Settings, log: Log) {
 		this.settings = settings;
@@ -76,10 +73,14 @@ export class Runner {
 		this.#stopped = true;
 		clearTimeout(this.#timer);
 		clearTimeout(this.#expiryTimer);
-		void this.#subscription?.return?.();
+		this.#closeSubscription();
 	}
 
-	/** Runs a tick after `delayMs` unless one is already due sooner. */
+	#closeSubscription(): void {
+		Promise.resolve(this.#subscription?.return?.()).catch(() => {});
+		this.#subscription = undefined;
+	}
+
 	schedule(delayMs: number): void {
 		if (this.#stopped) return;
 		const at = Date.now() + delayMs;
@@ -89,28 +90,20 @@ export class Runner {
 		this.#timer = setTimeout(() => {
 			this.#timer = undefined;
 			this.#timerAt = Infinity;
-			void this.tick();
+			if (this.#running) this.#rerun = true;
+			else void this.tick();
 		}, delayMs);
 		this.#timer.unref?.();
 	}
 
 	async #catchUp(retryMs = 1_000): Promise<void> {
 		try {
-			let batch: Record<string, unknown>[] = [];
-			const flush = async () => {
-				const rows = batch;
-				batch = [];
-				const now = Date.now();
-				await transaction(async (txn: object) => {
-					for (const row of rows) await recordMemory(row, txn, { now, onlyIfNewer: true });
-				});
-			};
-			for await (const row of scanMemories({ includeInactive: true })) {
+			for await (const row of agentMemory.scanMemories({ includeInactive: true })) {
 				if (this.#stopped) return;
-				batch.push(row);
-				if (batch.length >= SCAN_BATCH) await flush();
+				// one member lock per transaction: the sink may hold several, so holding more here could deadlock
+				await transaction((txn: object) => recordMemory(row, txn, { now: Date.now(), onlyIfNewer: true }));
 			}
-			if (batch.length) await flush();
+			if (this.#stopped) return;
 			this.#ready = true;
 			this.schedule(0);
 		} catch (error) {
@@ -127,6 +120,7 @@ export class Runner {
 			try {
 				const events = await SummaryChange.subscribe({});
 				this.#subscription = events[Symbol.asyncIterator]();
+				if (this.#stopped) break;
 				// a change committed while unsubscribed is caught by the tick this schedules
 				this.schedule(this.settings.debounceMs);
 				for (;;) {
@@ -139,6 +133,7 @@ export class Runner {
 			}
 			if (!this.#stopped) await new Promise((resolve) => setTimeout(resolve, 5_000).unref?.());
 		}
+		this.#closeSubscription();
 	}
 
 	async #hasWork(): Promise<boolean> {
@@ -159,8 +154,9 @@ export class Runner {
 	}
 
 	async tick(): Promise<void> {
-		if (this.#running || this.#stopped || !this.#ready) return;
+		if (this.#running || this.#stopped || !this.#ready || !this.settings.runner) return;
 		this.#running = true;
+		this.#rerun = false;
 		try {
 			if (!(await this.#hasWork())) {
 				await this.#armExpiry();
@@ -189,6 +185,7 @@ export class Runner {
 			this.schedule(this.#backoff);
 		} finally {
 			this.#running = false;
+			if (this.#rerun && !this.#stopped) this.schedule(0);
 		}
 	}
 
@@ -215,11 +212,10 @@ export class Runner {
 		const { SummaryState } = summaryTables();
 		return transaction(async (txn: object) => {
 			try {
-				// cluster-exclusive when record-lock transport is configured, exclusive within this node otherwise
-				await SummaryState.lock(RUNNER_ID, { lease: 10_000, timeout: 10_000 }, txn);
+				await lockRunner(txn);
 			} catch (error: any) {
 				if (error?.statusCode === 423) return Date.now() + 10_000;
-				if (error?.statusCode !== 501) throw error;
+				throw error;
 			}
 			const state = await SummaryState.get(RUNNER_ID, txn);
 			const now = Date.now();
@@ -241,7 +237,9 @@ export class Runner {
 		await this.#acquireLease(true);
 	}
 
+	/** Inside a publish transaction: fails unless this worker still holds the lease, under the runner lock. */
 	async #assertLease(txn: object): Promise<void> {
+		await lockRunner(txn);
 		const state = await summaryTables().SummaryState.get(RUNNER_ID, txn);
 		if (state?.leaseHolder !== this.holderId || !(state.leaseUntil > Date.now())) throw new LeaseLostError();
 	}
@@ -254,7 +252,7 @@ export class Runner {
 		});
 	}
 
-	/** Rebuilds every partition with pending changes or expired members; returns how many failed. */
+	/** Returns how many partitions failed. */
 	async #pass(): Promise<number> {
 		const { SummaryChange } = summaryTables();
 		const partitions = new Map<string, readonly string[]>();
@@ -296,10 +294,10 @@ export class Runner {
 			await collect<any>(SummaryMember.search({ conditions: [{ attribute: 'partition', value: partition }] }))
 		).map((row) => ({ ...row }));
 		const expired = rows.filter((row) => row.eligible && isExpired(row.validUntil, now));
-		// Current memory state, read after the changes above: a memory that changed since its member row was written
-		// has a change row of its own (not in `changes`), so it is left out here and picked up by the next pass.
+		// A memory that changed after its member row was written has its own pending change, not in `changes`: it is
+		// left out of this pass, and the next pass picks it up.
 		const recorded = new Map<string, number>(rows.filter((row) => row.eligible).map((row) => [row.id, row.revision]));
-		const current = await getMemories([...recorded.keys()]);
+		const current = await agentMemory.getMemories([...recorded.keys()]);
 		const eligible = current.filter(
 			(memory) =>
 				isEligible(memory, now) &&
@@ -335,6 +333,7 @@ export class Runner {
 			})),
 			clusteredSize: meta?.clusteredSize ?? null,
 			revoked,
+			current: new Set(members.map(memberRef)),
 			settings,
 			newId: () => `${partition.slice(0, 12)}-${randomUUID().slice(0, 13)}`,
 		});
@@ -351,7 +350,7 @@ export class Runner {
 					? node.memberIds.map((id) => textOf.get(id)!)
 					: children.map((child) => `${child.title}: ${child.summary}`);
 				await this.#renewLease();
-				this.modelCalls++;
+				if (this.#stopped) throw new LeaseLostError();
 				const { title, summary } = await summarize(models, texts, node.level, {
 					model: settings.generativeModel,
 					maxTokens: settings.maxSummaryTokens,
@@ -393,23 +392,6 @@ export class Runner {
 			await this.#assertLease(txn);
 			for (const node of written.values()) await SummaryNode.put(node, txn);
 			for (const id of plan.deleteIds) await SummaryNode.delete(id, txn);
-			const memberUpdates = [...plan.leafOf.entries()]
-				.filter(([id, leafId]) => storedLeaf.get(id) !== leafId)
-				.map(([id, leafId]) => ({ id, leafId, expire: false }))
-				.concat(expired.map((row) => ({ id: row.id, leafId: null, expire: true })))
-				.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-			for (const update of memberUpdates) {
-				await lockRow(SummaryMember, update.id, txn);
-				const current = await SummaryMember.get(update.id, txn);
-				if (!current || current.partition !== partition) continue;
-				const expire = update.expire && current.eligible && isExpired(current.validUntil, Date.now());
-				await SummaryMember.put(
-					expire
-						? { ...current, eligible: false, leafId: null, validUntil: null }
-						: { ...current, leafId: update.leafId },
-					txn,
-				);
-			}
 			if (written.size) {
 				await SummaryPartition.put(
 					{ id: partition, labels, clusteredSize: plan.clusteredSize, clusteredAt: new Date() },
@@ -420,29 +402,69 @@ export class Runner {
 			}
 			for (const change of changes) await SummaryChange.delete(change.id, txn);
 		});
+
+		// Leaf assignments only steer annotations and the next incremental pass, so they follow the publish, one member
+		// lock per transaction like every other writer except the sink.
+		const updates = [...plan.leafOf.entries()]
+			.filter(([id, leafId]) => storedLeaf.get(id) !== leafId)
+			.map(([id, leafId]) => ({ id, leafId, expire: false }))
+			.concat(expired.map((row) => ({ id: row.id, leafId: null, expire: true })));
+		for (const update of updates) {
+			await transaction(async (txn: object) => {
+				await lockRow(SummaryMember, update.id, txn);
+				const stored = await SummaryMember.get(update.id, txn);
+				if (!stored || stored.partition !== partition) return;
+				const expire = update.expire && stored.eligible && isExpired(stored.validUntil, Date.now());
+				await SummaryMember.put(
+					expire
+						? { ...stored, eligible: false, leafId: null, validUntil: null }
+						: { ...stored, leafId: update.leafId },
+					txn,
+				);
+			});
+		}
 	}
 
-	/** agent-memory's stored vectors when they come from this plugin's embedding model; others are embedded now. */
+	/** agent-memory's stored vectors when they come from this plugin's embedding model; others are embedded once. */
 	async #vectorsOf(
 		memories: readonly Record<string, unknown>[],
 		textOf: ReadonlyMap<string, string>,
 	): Promise<Map<string, Vector>> {
 		const vectors = new Map<string, Vector>();
-		const missing: string[] = [];
+		const missing: { id: string; key: string }[] = [];
 		for (const memory of memories) {
 			const id = memory.id as string;
 			const embedding = memory.embedding as readonly number[] | undefined;
+			const key = `${id}@${memory.revision}`;
+			const cached = this.#vectorCache.get(key);
 			if (memory.embeddingModel === this.settings.embeddingModel && embedding?.length) vectors.set(id, embedding);
-			else missing.push(id);
+			else if (cached) vectors.set(id, cached);
+			else missing.push({ id, key });
 		}
 		for (let start = 0; start < missing.length; start += EMBED_BATCH) {
 			const batch = missing.slice(start, start + EMBED_BATCH);
 			const embedded = await models.embed(
-				batch.map((id) => textOf.get(id)!),
+				batch.map(({ id }) => textOf.get(id)!),
 				{ model: this.settings.embeddingModel },
 			);
-			batch.forEach((id, index) => vectors.set(id, embedded[index]));
+			batch.forEach(({ id, key }, index) => {
+				vectors.set(id, embedded[index]);
+				if (this.#vectorCache.size >= VECTOR_CACHE_LIMIT) this.#vectorCache.clear();
+				this.#vectorCache.set(key, embedded[index]);
+			});
 		}
 		return vectors;
+	}
+}
+
+/**
+ * The runner lock, in `txn`. Harper makes it cluster-exclusive when record-lock replication is configured and
+ * node-exclusive otherwise; LMDB has no record locks (501), where the lease row alone arbitrates.
+ */
+async function lockRunner(txn: object): Promise<void> {
+	try {
+		await summaryTables().SummaryState.lock(RUNNER_ID, { lease: 10_000, timeout: 10_000 }, txn);
+	} catch (error: any) {
+		if (error?.statusCode !== 501) throw error;
 	}
 }

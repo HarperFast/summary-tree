@@ -1,5 +1,6 @@
 import { Resource } from 'harper';
-import { resolvePrincipal, type Principal } from '@harperfast/agent-memory';
+import * as agentMemory from '@harperfast/agent-memory';
+import type { Principal } from '@harperfast/agent-memory';
 import { expandNode, hasPendingWork, notReady, readableTopNodes } from './serve.ts';
 
 // Harper's typings model `get` as overloaded; these routes only implement the static (target, context) form.
@@ -26,7 +27,7 @@ async function answer(context: any, target: { id?: string }): Promise<unknown> {
 	// A static verb skips Resource's transactional() wrapper, which would otherwise consume the request's pending
 	// authorize flag before this plugin's own table reads; access is decided by the principal below.
 	if (context && typeof context === 'object') context.authorize = false;
-	const principal: Principal = await resolvePrincipal(context);
+	const principal: Principal = await agentMemory.resolvePrincipal(context);
 	if (!state.ready) throw notReady();
 	if (target.id === undefined || target.id === '') {
 		return { nodes: await readableTopNodes(principal), pending: await hasPendingWork(principal) };

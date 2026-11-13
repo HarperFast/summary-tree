@@ -28,14 +28,14 @@ export async function lockRow(table: any, id: string, context: object): Promise<
 
 export interface RecordOptions {
 	now: number;
-	/** set by the startup walk: skip a memory whose stored member is at least this revision */
+	/** the startup walk: skip a memory already recorded at a later revision, or at this one in the same state */
 	onlyIfNewer?: boolean;
 }
 
 /**
- * Records one memory change for summarization, in `context`'s transaction: updates its member row (partition, leaf,
- * revision, eligibility; never memory text) and appends work for the partitions it left or joined. Makes no model call. Shared by the sink and the startup walk; every writer of
- * a member row takes its lock first, so a walk reading an older revision cannot overwrite a sink's newer write.
+ * Records one memory change in `context`'s transaction: its member row (partition, leaf, revision, eligibility; never
+ * memory text) and work for the partitions it left or joined. Makes no model call. Shared by the sink and the startup
+ * walk.
  */
 export async function recordMemory(
 	memory: Record<string, unknown>,
@@ -48,11 +48,21 @@ export async function recordMemory(
 	await lockRow(SummaryMember, id, context);
 	const previous = await SummaryMember.get(id, context);
 	const revision = typeof memory.revision === 'number' ? memory.revision : 0;
-	if (options.onlyIfNewer && previous && (previous.revision ?? 0) >= revision) return false;
-
 	const labels = partitionLabels(memory.scopes);
 	const partition = partitionId(labels);
 	const eligible = isEligible(memory, options.now);
+	const status = typeof memory.status === 'string' ? memory.status : null;
+	const flagged = memory.contentFlag !== undefined && memory.contentFlag !== null;
+	if (options.onlyIfNewer && previous) {
+		const stored = previous.revision ?? 0;
+		// Writes on two nodes can share a revision, so an equal revision counts as recorded only in the same state.
+		const same =
+			previous.partition === partition &&
+			previous.status === status &&
+			Boolean(previous.flagged) === flagged &&
+			Boolean(previous.eligible) === eligible;
+		if (stored > revision || (stored === revision && same)) return false;
+	}
 	const revoke = revokesFrom(previous ?? undefined, memory, partition);
 
 	await SummaryMember.put(
@@ -61,8 +71,8 @@ export async function recordMemory(
 			partition,
 			labels,
 			revision,
-			status: typeof memory.status === 'string' ? memory.status : null,
-			flagged: memory.contentFlag !== undefined && memory.contentFlag !== null,
+			status,
+			flagged,
 			eligible,
 			leafId: eligible && previous?.partition === partition ? (previous.leafId ?? null) : null,
 			validUntil: eligible && memory.validUntil ? new Date(memory.validUntil as string) : null,

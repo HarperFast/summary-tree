@@ -33,8 +33,6 @@ models.registerBackend(
 	}),
 );
 
-let generateCalls = 0;
-
 // "Summarizes" by listing the most frequent words of the quoted items, so a summary reveals exactly which memories
 // it was built from.
 models.registerBackend(
@@ -43,7 +41,6 @@ models.registerBackend(
 	models.defineBackend({
 		name: 'test-word-count-summarizer',
 		async generate(input) {
-			generateCalls++;
 			const user = typeof input === 'string' ? input : (input.messages ?? input).at(-1).content;
 			const data = user.slice(user.indexOf('<data>'), user.lastIndexOf('</data>'));
 			const counts = new Map();
@@ -58,9 +55,3 @@ models.registerBackend(
 		},
 	}),
 );
-
-export class ModelCalls extends Resource {
-	static async get() {
-		return { generate: generateCalls };
-	}
-}

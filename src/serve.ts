@@ -1,4 +1,5 @@
-import { canReadLabels, getMemories, type Principal } from '@harperfast/agent-memory';
+import * as agentMemory from '@harperfast/agent-memory';
+import type { Principal } from '@harperfast/agent-memory';
 import { isEligible, partitionId, partitionLabels } from './partition.ts';
 import { summaryTables } from './store.ts';
 
@@ -36,7 +37,7 @@ export async function blockedPartitions(): Promise<Set<string>> {
  * flagged members are never summarized, so the label test decides; a pending revocation hides the partition.
  */
 function servable(node: any, principal: Principal, blocked: ReadonlySet<string>): boolean {
-	return Boolean(node?.summary) && !blocked.has(node.partition) && canReadLabels(principal, node.labels);
+	return Boolean(node?.summary) && !blocked.has(node.partition) && agentMemory.canReadLabels(principal, node.labels);
 }
 
 export interface NodeView {
@@ -59,7 +60,6 @@ function view(node: any): NodeView {
 	};
 }
 
-/** Top nodes of every partition the principal can read, largest first. */
 export async function readableTopNodes(principal: Principal, blocked?: ReadonlySet<string>): Promise<NodeView[]> {
 	const { SummaryNode } = summaryTables();
 	blocked ??= await blockedPartitions();
@@ -74,7 +74,7 @@ export async function readableTopNodes(principal: Principal, blocked?: ReadonlyS
 export async function hasPendingWork(principal: Principal): Promise<boolean> {
 	const { SummaryChange } = summaryTables();
 	for await (const change of await SummaryChange.search({ select: ['labels'] })) {
-		if (canReadLabels(principal, change.labels)) return true;
+		if (agentMemory.canReadLabels(principal, change.labels)) return true;
 	}
 	return false;
 }
@@ -117,24 +117,24 @@ export async function orientation(principal: Principal, budgetChars: number) {
 	return items;
 }
 
-/** For each hit, the readable leaf summary it belongs to. */
 export async function annotateHits(
 	principal: Principal,
 	hits: readonly Readonly<Record<string, unknown>>[],
 ): Promise<Map<string, NodeView>> {
 	const { SummaryMember, SummaryNode } = summaryTables();
 	const blocked = await blockedPartitions();
-	const leaves = new Map<string, any>();
+	const members = await Promise.all(hits.map((hit) => SummaryMember.get(hit.id as string)));
+	const leafIds = [...new Set(members.filter((member) => member?.eligible && member.leafId).map((m) => m.leafId))];
+	const leaves = new Map<string, any>(
+		await Promise.all(leafIds.map(async (id): Promise<[string, any]> => [id, await SummaryNode.get(id)])),
+	);
 	const annotations = new Map<string, NodeView>();
-	for (const hit of hits) {
-		const id = hit.id as string;
-		const member = await SummaryMember.get(id);
-		if (!member?.eligible || !member.leafId) continue;
-		if (!leaves.has(member.leafId)) leaves.set(member.leafId, await SummaryNode.get(member.leafId));
+	members.forEach((member, index) => {
+		if (!member?.eligible || !member.leafId) return;
 		const leaf = leaves.get(member.leafId);
-		if (leaf?.partition !== member.partition || !servable(leaf, principal, blocked)) continue;
-		annotations.set(id, view(leaf));
-	}
+		if (leaf?.partition !== member.partition || !servable(leaf, principal, blocked)) return;
+		annotations.set(hits[index].id as string, view(leaf));
+	});
 	return annotations;
 }
 
@@ -156,9 +156,8 @@ export async function expandNode(principal: Principal, id: string) {
 	}
 	const assigned = await collect(SummaryMember.search({ conditions: [{ attribute: 'leafId', value: id }] }));
 	const ids = assigned.filter((member) => member.eligible && member.partition === node.partition).map((m) => m.id);
-	// checked against current state: a member withdrawn or moved since its assignment is not listed
 	const now = Date.now();
-	const members = (await getMemories(ids)).filter(
+	const members = (await agentMemory.getMemories(ids)).filter(
 		(memory) => isEligible(memory, now) && partitionId(partitionLabels(memory.scopes)) === node.partition,
 	);
 	return {

@@ -5,19 +5,22 @@ cost and endpoints are in [README.md](README.md).
 
 ## Sources
 
-- **agent-memory is the only reader of `Memory`.** This plugin learns about memories only through its sink
-  (`registerMemorySink`, called inside each lifecycle transaction) and `scanMemories` (the startup walk). Everything
-  the runner and the serving paths read is in the plugin's own tables (`schema/summary.graphql`).
+- **agent-memory is the only reader of `Memory`.** This plugin learns about memories through its sink
+  (`registerMemorySink`, called inside each lifecycle transaction), `scanMemories` (the startup walk) and
+  `getMemories` (current text and vectors, read by the runner and the leaf expand). Its own tables hold no memory text
+  (`schema/summary.graphql`).
 - **The sink only enqueues** (`recordMemory`, `src/store.ts`): one member-row read and write plus one or two change
   rows, all through the sink's `context` in the `memory` database, so they commit or roll back with the memory. No
   model call, no node read.
-- **Member rows are written under their node-scoped record lock** (`lockRow`) by the sink, the startup walk, the
-  runner's vector write and its leaf assignment. The walk applies a scanned row only when it is newer than the stored
-  member, so a walk that read revision N cannot overwrite a sink's N+1. The sink takes this lock after agent-memory's
-  `Memory` locks; no member-row writer holds a `Memory` lock, so there is no cycle.
-- **A member row keeps memory text only while the memory is eligible** (active, unexpired, no `needsReview`, no
-  `contentFlag`). Its `partition`, `status` and `flagged` stay after it becomes ineligible: a later change needs them
-  to know which partition to revoke.
+- **Member rows are written under their node-scoped record lock** (`lockRow`) by the sink, the startup walk and the
+  runner's leaf assignment. The walk applies a scanned row only when it is newer than the stored member, so a walk
+  that read revision N cannot overwrite a sink's N+1. The sink takes this lock after agent-memory's `Memory` locks;
+  no member-row writer holds a `Memory` lock, so there is no cycle.
+- **A member row keeps its `partition`, `status` and `flagged` after the memory becomes ineligible**: a later change
+  needs them to know which partition to revoke.
+- **The runner summarizes a memory only at the revision its member row records** (`Runner.rebuildPartition`). A
+  memory `getMemories` returns at another revision, or no longer eligible, changed after its member row was written;
+  its own change row is pending and the next pass handles it.
 
 ## Visibility
 

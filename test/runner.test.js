@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { databases, modelState, resetTables, rows, transaction } from 'harper';
-import { scanState } from '@harperfast/agent-memory';
+import { memoryStore } from '@harperfast/agent-memory';
 import { Runner } from '../dist/runner.js';
 import { DEFAULT_SETTINGS } from '../dist/settings.js';
 import { recordMemory } from '../dist/store.js';
@@ -37,12 +37,18 @@ let runner;
 beforeEach(() => {
 	resetTables();
 	Object.assign(modelState, { generateCalls: 0, onGenerate: undefined, generate: undefined, embed: undefined });
-	scanState.rows = [];
+	memoryStore.clear();
 });
+
+/** What agent-memory does on a write: store the row, then call the sink in the same transaction. */
+async function write(row) {
+	memoryStore.set(row.id, row);
+	await transaction((txn) => recordMemory(row, txn, { now: Date.now() }));
+}
 afterEach(() => runner?.stop());
 
 async function startWith(memories) {
-	scanState.rows = memories;
+	for (const row of memories) memoryStore.set(row.id, row);
 	runner = new Runner(settings, quiet);
 	runner.start();
 	await until(
@@ -58,7 +64,7 @@ test('the startup walk records memories its sink missed, then a pass builds and 
 	assert.equal(node.memberCount, 5);
 	assert.equal(node.top, true);
 	assert.deepEqual([...node.sourceIds].sort(), [1, 2, 3, 4, 5].map((n) => memory(n).id).sort());
-	assert.ok(rows('SummaryMember').every((member) => member.leafId === node.id && member.vector?.length));
+	assert.ok(rows('SummaryMember').every((member) => member.leafId === node.id));
 	assert.equal(modelState.generateCalls, 1);
 	assert.equal(rows('SummaryState')[0].leaseUntil, 0, 'the lease is released after the pass');
 });
@@ -67,19 +73,14 @@ test('a revoking change committed during a rebuild survives it and keeps the par
 	await startWith([1, 2, 3, 4, 5].map((n) => memory(n)));
 	modelState.onGenerate = async () => {
 		modelState.onGenerate = undefined;
-		await transaction((txn) =>
-			recordMemory(memory(5, { status: 'withdrawn', revision: 3 }), txn, { memberChars: 2000, now: Date.now() }),
-		);
+		await write(memory(5, { status: 'withdrawn', revision: 3 }));
 	};
 	runner.stop();
 	runner = new Runner(settings, quiet);
 	// a content change forces a model call, during which memory 5 is withdrawn
 	for (const n of [1, 2]) {
-		await transaction((txn) =>
-			recordMemory(memory(n, { content: `changed ${n}`, revision: 2 }), txn, { memberChars: 2000, now: Date.now() }),
-		);
+		await write(memory(n, { content: `changed ${n}`, revision: 2 }));
 	}
-	scanState.rows = [];
 	runner.start();
 	await until('the first rebuild to publish', async () => modelState.generateCalls >= 2);
 	await until('the second rebuild to absorb the withdrawal', async () => rows('SummaryChange').length === 0);
@@ -88,14 +89,25 @@ test('a revoking change committed during a rebuild survives it and keeps the par
 	assert.ok(modelState.generateCalls >= 3, 'the withdrawal forced a rebuild');
 });
 
+test('a memory changed after its member row was read is left out until its own change is processed', async () => {
+	await startWith([1, 2, 3, 4, 5].map((n) => memory(n)));
+	// agent-memory has revision 2 but the sink has not run yet: the runner must not summarize the newer text
+	memoryStore.set(memory(4).id, memory(4, { content: 'acme secret draft', revision: 2 }));
+	const prompts = [];
+	modelState.onGenerate = (input) => prompts.push(input.messages.at(-1).content);
+	await write(memory(1, { content: 'changed 1', revision: 2 }));
+	await write(memory(2, { content: 'changed 2', revision: 2 }));
+	await runner.tick();
+	assert.ok(prompts.length > 0);
+	assert.ok(prompts.every((prompt) => !prompt.includes('secret draft')));
+});
+
 test('a failed rebuild keeps its revoking changes, so the partition stays hidden', async () => {
 	await startWith([1, 2, 3, 4, 5].map((n) => memory(n)));
 	modelState.generate = async () => {
 		throw new Error('model unavailable');
 	};
-	await transaction((txn) =>
-		recordMemory(memory(3, { status: 'withdrawn', revision: 2 }), txn, { memberChars: 2000, now: Date.now() }),
-	);
+	await write(memory(3, { status: 'withdrawn', revision: 2 }));
 	await runner.tick();
 	assert.ok(rows('SummaryChange').some((change) => change.revoke));
 	assert.deepEqual(await readableTopNodes(acmeReader), []);
@@ -112,12 +124,8 @@ test('a rebuild whose lease moved to another worker publishes nothing', async ()
 			leaseUntil: Date.now() + 60_000,
 		});
 	};
-	await transaction((txn) =>
-		recordMemory(memory(1, { content: 'changed', revision: 2 }), txn, { memberChars: 2000, now: Date.now() }),
-	);
-	await transaction((txn) =>
-		recordMemory(memory(2, { content: 'changed', revision: 2 }), txn, { memberChars: 2000, now: Date.now() }),
-	);
+	await write(memory(1, { content: 'changed', revision: 2 }));
+	await write(memory(2, { content: 'changed', revision: 2 }));
 	await runner.tick();
 	assert.deepEqual(rows('SummaryNode')[0].summary, before.summary);
 	assert.equal(rows('SummaryChange').length, 2, 'its changes stay for the leaseholder');
@@ -130,5 +138,4 @@ test('an expired member leaves its summary without any change event', async () =
 	await until('expiry to rebuild the node', async () => rows('SummaryNode')[0]?.memberCount === 4, 5_000);
 	const expired = rows('SummaryMember').find((member) => member.id === memory(5).id);
 	assert.equal(expired.eligible, false);
-	assert.equal(expired.text, null);
 });

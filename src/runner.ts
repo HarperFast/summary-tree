@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { threadId } from 'node:worker_threads';
 import { models, transaction } from 'harper';
-import { scanMemories } from '@harperfast/agent-memory';
-import { normalize } from './kmeans.ts';
-import { isExpired } from './partition.ts';
+import { getMemories, scanMemories } from '@harperfast/agent-memory';
+import { normalize, type Vector } from './kmeans.ts';
+import { isEligible, isExpired, memberText, partitionId, partitionLabels } from './partition.ts';
 import { memberRef, planPartition, type ExistingNode, type PlanMember } from './plan.ts';
 import { promptInputChars, type Settings } from './settings.ts';
 import { lockRow, recordMemory, summaryTables } from './store.ts';
@@ -95,7 +95,6 @@ export class Runner {
 	}
 
 	async #catchUp(retryMs = 1_000): Promise<void> {
-		const settings = this.settings;
 		try {
 			let batch: Record<string, unknown>[] = [];
 			const flush = async () => {
@@ -103,13 +102,7 @@ export class Runner {
 				batch = [];
 				const now = Date.now();
 				await transaction(async (txn: object) => {
-					for (const row of rows) {
-						const vector =
-							row.embeddingModel === settings.embeddingModel && Array.isArray(row.embedding)
-								? (row.embedding as number[])
-								: null;
-						await recordMemory(row, txn, { memberChars: settings.memberChars, now, onlyIfNewer: true, vector });
-					}
+					for (const row of rows) await recordMemory(row, txn, { now, onlyIfNewer: true });
 				});
 			};
 			for await (const row of scanMemories({ includeInactive: true })) {
@@ -303,18 +296,27 @@ export class Runner {
 			await collect<any>(SummaryMember.search({ conditions: [{ attribute: 'partition', value: partition }] }))
 		).map((row) => ({ ...row }));
 		const expired = rows.filter((row) => row.eligible && isExpired(row.validUntil, now));
-		const eligible = rows.filter((row) => row.eligible && row.text && !isExpired(row.validUntil, now));
-		await this.#embedMissing(eligible);
-
-		const textOf = new Map<string, string>(eligible.map((row) => [row.id, row.text]));
-		const members: PlanMember[] = eligible
-			.filter((row) => row.vector?.length)
-			.map((row) => ({
-				id: row.id,
-				revision: row.revision ?? 0,
-				vector: normalize(row.vector),
-				leafId: row.leafId ?? null,
-			}));
+		// Current memory state, read after the changes above: a memory that changed since its member row was written
+		// has a change row of its own (not in `changes`), so it is left out here and picked up by the next pass.
+		const recorded = new Map<string, number>(rows.filter((row) => row.eligible).map((row) => [row.id, row.revision]));
+		const current = await getMemories([...recorded.keys()]);
+		const eligible = current.filter(
+			(memory) =>
+				isEligible(memory, now) &&
+				partitionId(partitionLabels(memory.scopes)) === partition &&
+				memory.revision === recorded.get(memory.id as string),
+		);
+		const textOf = new Map<string, string>(
+			eligible.map((memory) => [memory.id as string, memberText(memory, settings.memberChars)]),
+		);
+		const vectors = await this.#vectorsOf(eligible, textOf);
+		const storedLeaf = new Map<string, string | null>(rows.map((row) => [row.id, row.leafId ?? null]));
+		const members: PlanMember[] = eligible.map((memory) => ({
+			id: memory.id as string,
+			revision: memory.revision as number,
+			vector: normalize(vectors.get(memory.id as string)!),
+			leafId: storedLeaf.get(memory.id as string) ?? null,
+		}));
 		const existing = await collect<any>(
 			SummaryNode.search({ conditions: [{ attribute: 'partition', value: partition }] }),
 		);
@@ -338,7 +340,6 @@ export class Runner {
 		});
 
 		const revisionOf = new Map(members.map((member) => [member.id, member]));
-		const storedLeaf = new Map<string, string | null>(rows.map((row) => [row.id, row.leafId ?? null]));
 		const written = new Map<string, Record<string, unknown>>();
 		const maxInputChars = promptInputChars(settings);
 		for (const node of plan.nodes) {
@@ -404,7 +405,7 @@ export class Runner {
 				const expire = update.expire && current.eligible && isExpired(current.validUntil, Date.now());
 				await SummaryMember.put(
 					expire
-						? { ...current, eligible: false, leafId: null, text: null, vector: null, validUntil: null }
+						? { ...current, eligible: false, leafId: null, validUntil: null }
 						: { ...current, leafId: update.leafId },
 					txn,
 				);
@@ -421,26 +422,27 @@ export class Runner {
 		});
 	}
 
-	async #embedMissing(rows: any[]): Promise<void> {
-		const { SummaryMember } = summaryTables();
-		const missing = rows.filter((row) => !row.vector?.length);
+	/** agent-memory's stored vectors when they come from this plugin's embedding model; others are embedded now. */
+	async #vectorsOf(
+		memories: readonly Record<string, unknown>[],
+		textOf: ReadonlyMap<string, string>,
+	): Promise<Map<string, Vector>> {
+		const vectors = new Map<string, Vector>();
+		const missing: string[] = [];
+		for (const memory of memories) {
+			const id = memory.id as string;
+			const embedding = memory.embedding as readonly number[] | undefined;
+			if (memory.embeddingModel === this.settings.embeddingModel && embedding?.length) vectors.set(id, embedding);
+			else missing.push(id);
+		}
 		for (let start = 0; start < missing.length; start += EMBED_BATCH) {
 			const batch = missing.slice(start, start + EMBED_BATCH);
-			const vectors = await models.embed(
-				batch.map((row) => row.text),
+			const embedded = await models.embed(
+				batch.map((id) => textOf.get(id)!),
 				{ model: this.settings.embeddingModel },
 			);
-			await transaction(async (txn: object) => {
-				for (let i = 0; i < batch.length; i++) {
-					const row = batch[i];
-					row.vector = Array.from(vectors[i]);
-					await lockRow(SummaryMember, row.id, txn);
-					const current = await SummaryMember.get(row.id, txn);
-					if (current?.revision === row.revision && current.text === row.text) {
-						await SummaryMember.put({ ...current, vector: row.vector }, txn);
-					}
-				}
-			});
+			batch.forEach((id, index) => vectors.set(id, embedded[index]));
 		}
+		return vectors;
 	}
 }

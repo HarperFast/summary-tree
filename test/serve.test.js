@@ -1,6 +1,7 @@
 import { beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { databases, resetTables } from 'harper';
+import { memoryStore } from '@harperfast/agent-memory';
 import { annotateHits, expandNode, orientation, readableTopNodes } from '../dist/serve.js';
 import { partitionId, partitionLabels } from '../dist/partition.js';
 
@@ -29,6 +30,7 @@ async function node(id, scopes, fields = {}) {
 
 beforeEach(async () => {
 	resetTables();
+	memoryStore.clear();
 	await node('global-1', ['global'], { memberCount: 40, level: 2 });
 	await node('global-1a', ['global'], { memberCount: 15, parentId: 'global-1', top: false });
 	await node('acme-1', ['customer:acme'], { memberCount: 5 });
@@ -45,8 +47,9 @@ beforeEach(async () => {
 			labels: scopes,
 			eligible: true,
 			leafId,
-			title: `${id} title`,
+			revision: 1,
 		});
+		memoryStore.set(id, { id, title: `${id} title`, content: 'c', scopes, status: 'active', revision: 1 });
 	}
 });
 
@@ -114,6 +117,8 @@ test('expanding returns children of an interior node and member ids of a leaf; u
 	);
 	const leaf = await expandNode(acmeReader, 'acme-1');
 	assert.deepEqual(leaf.members, [{ id: 'm-acme', title: 'm-acme title' }]);
+	memoryStore.set('m-acme', { ...memoryStore.get('m-acme'), status: 'withdrawn', revision: 2 });
+	assert.deepEqual((await expandNode(acmeReader, 'acme-1')).members, [], 'current state wins over the assignment');
 	await assert.rejects(expandNode(globalReader, 'acme-1'), { statusCode: 404 });
 	await assert.rejects(expandNode(globalReader, 'missing'), { statusCode: 404 });
 });

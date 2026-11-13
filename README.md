@@ -16,7 +16,8 @@ Summaries never change a memory. They are derived, read-only, and rebuilt as mem
 
 ## Install
 
-The plugin runs beside agent-memory 0.1.5 or later, in the same app or another app on the same Harper (5.3.1 or
+The plugin runs beside agent-memory 0.1.5 or later (for `scanMemories`, `getMemories`, bootstrap sections and search
+annotators), in the same app or another app on the same Harper (5.3.1 or
 later; 5.4 for cluster-wide runner locks). Add both to an app's `config.yaml`, or this plugin alone to a second app
 whose `node_modules` also holds agent-memory:
 
@@ -79,8 +80,9 @@ without that memory; other partitions keep serving.
 ## Freshness
 
 agent-memory calls the plugin's sink inside each memory change's transaction. The sink makes no model call: it
-updates the memory's assignment row and appends a change row, both in the `memory` database, so they commit or roll
-back with the memory. A debounced runner then rebuilds only the partitions with pending changes:
+updates the memory's assignment row (partition, topic, revision; no memory text) and appends a change row, both in the
+`memory` database, so they commit or roll back with the memory. A debounced runner then rebuilds only the partitions
+with pending changes, reading current memory text and vectors from agent-memory with `getMemories`:
 
 - Below `rebuildGrowth`, new memories join the nearest existing topic and node ids stay the same. A re-cluster matches
   new topics to old ones by shared members and keeps their ids, so clients can hold on to a node id.
@@ -99,13 +101,13 @@ same transaction as the memory.
 
 ## Cost
 
-| Event                       | Model calls                                                                                      |
-| --------------------------- | ------------------------------------------------------------------------------------------------ |
-| Any memory write            | none in the write path                                                                           |
-| New or edited memory        | one embedding (skipped when agent-memory's vector is reusable); a summary once the leaf is dirty |
-| Leaf crosses its dirty mark | one summary for the leaf, plus one per ancestor level (at most 2 for a few thousand memories)    |
-| Withdraw / flag / move      | one summary per node that was built from that memory                                             |
-| Re-cluster (size ×2 or ÷2)  | one per new or changed topic; topics that kept their members keep their text                     |
+| Event                       | Model calls                                                                                   |
+| --------------------------- | --------------------------------------------------------------------------------------------- |
+| Any memory write            | none in the write path                                                                        |
+| New or edited memory        | a summary once its leaf is dirty; no embedding while `embeddingModel` matches agent-memory's  |
+| Leaf crosses its dirty mark | one summary for the leaf, plus one per ancestor level (at most 2 for a few thousand memories) |
+| Withdraw / flag / move      | one summary per node that was built from that memory                                          |
+| Re-cluster (size ×2 or ÷2)  | one per new or changed topic; topics that kept their members keep their text                  |
 
 With the defaults, a 15-memory leaf is re-summarized about once per 2–3 member changes. The first build of a
 2,000-memory partition makes about 150 calls (≈ n/15 leaves plus ≈ n/150 above them).
@@ -142,7 +144,8 @@ npm run test:integration # packs the plugin, runs agent-memory and this plugin a
 npm run eval:orientation # needs local models; see the script's header
 ```
 
-Until agent-memory 0.1.5 is published, `vendor/` holds a package built from its main branch (the commit that added
-`scanMemories`, bootstrap sections and search annotators), used for development and the integration fixtures.
+Until agent-memory 0.1.5 is published, `vendor/` holds a package built from its pending `getMemories` branch (on top
+of the main-branch commit that added `scanMemories`, bootstrap sections and search annotators), used for development
+and the integration fixtures. Replace it with `^0.1.5` once released.
 
 See [DESIGN.md](DESIGN.md) for the invariants the code relies on.

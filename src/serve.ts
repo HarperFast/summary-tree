@@ -1,4 +1,5 @@
-import { canReadLabels, type Principal } from '@harperfast/agent-memory';
+import { canReadLabels, getMemories, type Principal } from '@harperfast/agent-memory';
+import { isEligible, partitionId, partitionLabels } from './partition.ts';
 import { summaryTables } from './store.ts';
 
 export class SummaryError extends Error {
@@ -153,11 +154,15 @@ export async function expandNode(principal: Principal, id: string) {
 				.map(view),
 		};
 	}
-	const members = await collect(SummaryMember.search({ conditions: [{ attribute: 'leafId', value: id }] }));
+	const assigned = await collect(SummaryMember.search({ conditions: [{ attribute: 'leafId', value: id }] }));
+	const ids = assigned.filter((member) => member.eligible && member.partition === node.partition).map((m) => m.id);
+	// checked against current state: a member withdrawn or moved since its assignment is not listed
+	const now = Date.now();
+	const members = (await getMemories(ids)).filter(
+		(memory) => isEligible(memory, now) && partitionId(partitionLabels(memory.scopes)) === node.partition,
+	);
 	return {
 		node: view(node),
-		members: members
-			.filter((member) => member.eligible && member.partition === node.partition)
-			.map((member) => ({ id: member.id, title: member.title ?? null })),
+		members: members.map((memory) => ({ id: memory.id as string, title: (memory.title as string) ?? null })),
 	};
 }

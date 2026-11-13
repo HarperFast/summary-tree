@@ -37,7 +37,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 	const runner = new Runner(settings, scope.logger);
 	setServingState(runner);
 	const record = (memory: Record<string, unknown>, context: object) =>
-		recordMemory(memory, context, { memberChars: runner.settings.memberChars, now: Date.now() });
+		recordMemory(memory, context, { now: Date.now() });
 	const unregister = [
 		agentMemory.registerMemorySink({ write: record, withdraw: record }),
 		agentMemory.registerBootstrapSection({

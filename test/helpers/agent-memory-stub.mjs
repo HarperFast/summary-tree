@@ -10,7 +10,8 @@ export async function resolvePrincipal(context) {
 }
 
 export const registered = { sinks: [], sections: [], annotators: [] };
-export const scanState = { rows: [] };
+/** agent-memory's stored memories, by id, as scanMemories and getMemories return them */
+export const memoryStore = new Map();
 
 export function registerMemorySink(sink) {
 	registered.sinks.push(sink);
@@ -26,5 +27,9 @@ export function registerSearchAnnotator(annotator) {
 }
 
 export async function* scanMemories() {
-	yield* scanState.rows;
+	yield* [...memoryStore.values()].map((row) => structuredClone(row));
+}
+
+export async function getMemories(ids) {
+	return [...new Set(ids)].filter((id) => memoryStore.has(id)).map((id) => structuredClone(memoryStore.get(id)));
 }

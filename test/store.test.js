@@ -5,7 +5,7 @@ import { recordMemory } from '../dist/store.js';
 import { partitionId } from '../dist/partition.js';
 
 const NOW = Date.parse('2026-11-12T00:00:00Z');
-const opts = { memberChars: 2000, now: NOW };
+const opts = { now: NOW };
 const memory = (overrides = {}) => ({
 	id: 'mem-aaaaaaaaaaaaaaaa',
 	title: 'T',
@@ -30,7 +30,8 @@ test('the sink only enqueues: a member row and a change row, no model call', asy
 	const [member] = rows('SummaryMember');
 	assert.equal(member.partition, ACME);
 	assert.equal(member.eligible, true);
-	assert.equal(member.text, 'T: body');
+	assert.equal(member.revision, 1);
+	assert.ok(!('text' in member) && !('content' in member), 'no memory text is copied');
 	assert.deepEqual(changes(), [{ partition: ACME, revoke: false, memoryId: 'mem-aaaaaaaaaaaaaaaa' }]);
 	assert.ok(
 		lockCalls.some((call) => call.table === 'SummaryMember' && call.inTransaction),
@@ -58,7 +59,6 @@ test('withdrawing a member revokes its old partition through the assignment row'
 	assert.deepEqual(changes(), [{ partition: ACME, revoke: true, memoryId: 'mem-aaaaaaaaaaaaaaaa' }]);
 	const [member] = rows('SummaryMember');
 	assert.equal(member.eligible, false);
-	assert.equal(member.text, null, 'no copy of a withdrawn memory is kept');
 	assert.equal(member.leafId, null);
 });
 
@@ -102,15 +102,6 @@ test('a content flag revokes; clearing it re-includes the memory', async () => {
 	await transaction((txn) => recordMemory(memory({ contentFlag: null, revision: 3 }), txn, opts));
 	assert.deepEqual(changes(), [{ partition: ACME, revoke: false, memoryId: 'mem-aaaaaaaaaaaaaaaa' }]);
 	assert.equal(rows('SummaryMember')[0].eligible, true);
-});
-
-test('a revision keeps the stored vector only while the text is unchanged', async () => {
-	await transaction((txn) => recordMemory(memory(), txn, { ...opts, vector: [1, 2, 3] }));
-	assert.deepEqual(rows('SummaryMember')[0].vector, [1, 2, 3]);
-	await transaction((txn) => recordMemory(memory({ tags: ['x'], revision: 2 }), txn, opts));
-	assert.deepEqual(rows('SummaryMember')[0].vector, [1, 2, 3]);
-	await transaction((txn) => recordMemory(memory({ content: 'new body', revision: 3 }), txn, opts));
-	assert.equal(rows('SummaryMember')[0].vector, null);
 });
 
 test('the startup walk skips a memory the sink already recorded at that revision or later', async () => {

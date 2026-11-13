@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { databases } from 'harper';
-import { isEligible, memberText, partitionId, partitionLabels, revokesFrom } from './partition.ts';
+import { isEligible, partitionId, partitionLabels, revokesFrom } from './partition.ts';
 
 export interface Tables {
 	SummaryMember: any;
@@ -27,17 +27,14 @@ export async function lockRow(table: any, id: string, context: object): Promise<
 }
 
 export interface RecordOptions {
-	memberChars: number;
 	now: number;
 	/** set by the startup walk: skip a memory whose stored member is at least this revision */
 	onlyIfNewer?: boolean;
-	/** a vector to store with an eligible member (the startup walk passes agent-memory's when the model matches) */
-	vector?: readonly number[] | null;
 }
 
 /**
- * Records one memory change for summarization, in `context`'s transaction: updates its member row and appends work
- * for the partitions it left or joined. Makes no model call. Shared by the sink and the startup walk; every writer of
+ * Records one memory change for summarization, in `context`'s transaction: updates its member row (partition, leaf,
+ * revision, eligibility; never memory text) and appends work for the partitions it left or joined. Makes no model call. Shared by the sink and the startup walk; every writer of
  * a member row takes its lock first, so a walk reading an older revision cannot overwrite a sink's newer write.
  */
 export async function recordMemory(
@@ -56,12 +53,6 @@ export async function recordMemory(
 	const labels = partitionLabels(memory.scopes);
 	const partition = partitionId(labels);
 	const eligible = isEligible(memory, options.now);
-	const text = eligible ? memberText(memory, options.memberChars) : null;
-	let vector: readonly number[] | null = null;
-	if (eligible) {
-		if (options.vector?.length) vector = Array.from(options.vector);
-		else if (previous?.text === text && previous?.vector?.length) vector = previous.vector;
-	}
 	const revoke = revokesFrom(previous ?? undefined, memory, partition);
 
 	await SummaryMember.put(
@@ -74,11 +65,7 @@ export async function recordMemory(
 			flagged: memory.contentFlag !== undefined && memory.contentFlag !== null,
 			eligible,
 			leafId: eligible && previous?.partition === partition ? (previous.leafId ?? null) : null,
-			title: eligible && typeof memory.title === 'string' ? memory.title : null,
-			text,
-			vector,
 			validUntil: eligible && memory.validUntil ? new Date(memory.validUntil as string) : null,
-			createdAt: memory.createdAt ? new Date(memory.createdAt as string) : null,
 		},
 		context,
 	);

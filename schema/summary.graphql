@@ -2,7 +2,7 @@
 # Not exported: every read goes through the plugin's routes, which authorize with agent-memory's principal.
 
 # One row per memory the sink or the startup walk has seen: the assignment that lets a later change find the old
-# partition and leaf. `text` and `vector` are kept only while the memory is eligible.
+# partition and leaf. It holds no memory text; the runner reads that from agent-memory with getMemories.
 type SummaryMember @table(database: "memory") {
 	id: ID @primaryKey
 	partition: String @indexed
@@ -12,11 +12,7 @@ type SummaryMember @table(database: "memory") {
 	flagged: Boolean
 	eligible: Boolean
 	leafId: String @indexed
-	title: String
-	text: String
-	vector: [Float]
 	validUntil: Date @indexed
-	createdAt: Date
 }
 
 type SummaryNode @table(database: "memory") {

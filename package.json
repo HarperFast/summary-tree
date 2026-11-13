@@ -32,7 +32,8 @@
 		"prepack": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && tsc --sourceMap false",
 		"test": "npm run build && node --import ./test/helpers/harper-mock.mjs --test \"test/**/*.test.js\"",
 		"install:fixtures": "node scripts/install-fixtures.js",
-		"test:integration": "npm run build && npm run install:fixtures && harper-integration-test-run \"integrationTests/**/*.test.ts\"",
+		"test:integration": "npm run build && npm run install:fixtures && npm run test:integration:run",
+		"test:integration:run": "harper-integration-test-run \"integrationTests/**/*.test.ts\"",
 		"eval:orientation": "node scripts/eval-orientation.mjs",
 		"format:check": "prettier --check .",
 		"format:write": "prettier --write ."

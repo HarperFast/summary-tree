@@ -1,5 +1,4 @@
+pluginModule: 'dist/index.js'
+
 graphqlSchema:
-  files: '*.graphql'
-jsResource:
-  files: resources.js
-rest: true
+  files: 'schema/*.graphql'

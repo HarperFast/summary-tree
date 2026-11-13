@@ -1,0 +1,6 @@
+{
+	"name": "summary-tree-fixture-summary-app",
+	"private": true,
+	"type": "module",
+	"description": "Integration-test app hosting @harperfast/summary-tree. scripts/install-fixtures.js installs the packed plugin and agent-memory."
+}

@@ -1,116 +1,166 @@
-# summary-tree
+# @harperfast/summary-tree
 
-Reference implementation of the RAPTOR-style **summary tree** retrieval pattern from
-[harper#1244](https://github.com/HarperFast/harper/issues/1244) (Thread B) — hierarchical,
-"zoom-out" retrieval as a **pure Harper application**: no core changes, no external
-services beyond the configured models.
+Topic summaries over [@harperfast/agent-memory](https://github.com/HarperFast/agent-memory): a Harper plugin that
+clusters stored memories by embedding, has a generative model summarize each cluster, and serves the result so an
+agent starting a session knows what is stored before it asks.
 
-Retrieval over a flat chunk index answers *"what does `searchLayer` return?"* well and
-*"what does this codebase do?"* badly. This component adds the missing layer: chunks are
-clustered by embedding, each cluster is LLM-summarized into a `Summary` row (itself
-embedded and HNSW-indexed by `@embed`), recursively, giving broad queries real summary
-nodes to land on. The [pre-gate evaluation](https://github.com/HarperFast/harper/issues/1244#issuecomment-4949385426)
-measured 2.4× thematic topic coverage at the same token budget with no factoid regression
-at k≥5.
+- **Orientation at session start.** `GET /Memory/bootstrap` gains an `orientation` section: the top levels of every
+  summary tree the caller can read, largest topics first, inside the caller's character budget. Clients get it with
+  no change; agent-memory frames it as stored data like any memory.
+- **Topic beside each search hit.** Search results (`GET /Memory/?q=`, MCP `recall`) carry a `summaryTree` field on
+  each hit: the topic it belongs to, its summary and how many memories share it.
+- **Open a topic.** `GET /SummaryTree/<id>` returns a summary node with its subtopics, or the ids and titles of its
+  memories. An MCP tool, `expand_summary`, does the same.
 
-Unlike the published RAPTOR (batch/static), this tree is **live**: chunk writes are
-assigned to the nearest cluster centroid via a table subscription, clusters dirty-mark,
-and a periodic pass re-summarizes only dirty clusters (~4 LLM calls for a typical
-single-source update vs a full rebuild).
+Summaries never change a memory. They are derived, read-only, and rebuilt as memories change.
 
-## How it works
+## Install
 
-- **`schemas.graphql`** — `Chunk` (content + `@embed` vector + `summaryId` leaf link) and
-  `Summary` (LLM text + `@embed` vector + `level`, `parentId`, stored k-means `centroid`,
-  `dirtyCount`). Two tables, not one: the pre-gate showed the two-table merge is
-  metric-for-metric identical to a shared table, and it keeps `Chunk` an ordinary content
-  table.
-- **`resources.js`**
-  - `RagSearch` — `GET /RagSearch?q=...&limit=10&mode=mixed|chunks|summaries`. Embeds the
-    query (`models.embed`, `inputType: 'query'`), vector-searches both tables, merges by
-    exact cosine distance.
-  - `TreeStatus` — `GET /TreeStatus`: chunk/summary counts by level, dirty count, build
-    metadata.
-  - Maintenance loop — every 30s (leader-elected via a lease row; see frictions):
-    full build when a tree doesn't exist yet (≥40 chunks) or the corpus has ~2×'d;
-    otherwise sweep unassigned chunks + re-summarize dirty clusters (leaves first,
-    dirtiness propagates to parents).
-  - Chunk subscription — real-time nearest-centroid assignment of new/updated chunks.
-- **`lib/kmeans.js`** — spherical k-means (k-means++, deterministic seed, tiny-cluster
-  merge). **`lib/summarize.js`** — prompt/parse around `models.generate`.
-
-## Running it
-
-Requires a models config in the instance's `harper-config.yaml` — any embedding +
-generative backends work; local Ollama shown:
+The plugin runs beside agent-memory 0.1.5 or later (for `scanMemories`, `getMemories`, bootstrap sections and search
+annotators), in the same app or another app on the same Harper (5.3.1 or
+later; 5.4 for cluster-wide runner locks). Add both to an app's `config.yaml`, or this plugin alone to a second app
+whose `node_modules` also holds agent-memory:
 
 ```yaml
-models:
-  embedding:
-    embedder:            # logical name the schema's @embed(model: "embedder") refers to
-      backend: ollama
-      host: localhost:11434
-      model: nomic-embed-text:latest
-  generative:
-    summarizer:          # logical name the build loop's generate() calls use
-      backend: ollama
-      host: localhost:11434
-      model: llama3.2:3b
-      requestTimeoutMs: 120000
+'@harperfast/agent-memory':
+  package: '@harperfast/agent-memory'
+
+'@harperfast/summary-tree':
+  package: '@harperfast/summary-tree'
+  generativeModel: default # a models.generative entry in harper-config.yaml
+  contextTokens: 32768 # that model's context window
 ```
+
+It needs a generative model and an embedding model in Harper's `models:` configuration. Its tables live in
+agent-memory's `memory` database and replicate with it.
+
+**Multi-node clusters** need Harper's record-lock replication and agent-memory's `lockScope: cluster`. agent-memory
+calls the plugin's sink only on the node that makes a change. Under node-scoped locks, two nodes can change one memory
+at once, for example moving it to two different label sets. Summary text can then stay in the partition it left until
+replication lands and the runner's next pass revokes that partition. Without record-lock replication, also set
+`runner: false` on every node but one. The plugin cannot read agent-memory's `lockScope`, so it cannot enforce this.
+
+## Configuration
+
+Options go under the `'@harperfast/summary-tree'` key. A malformed change is logged and the previous configuration
+keeps running; `urlPath` and `mcp` take effect on restart.
+
+| Option             | Default       | Meaning                                                                                                           |
+| ------------------ | ------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `generativeModel`  | `default`     | Logical generative model that writes summaries                                                                    |
+| `embeddingModel`   | `default`     | Logical embedding model; a memory's stored vector is reused when agent-memory embedded it with this model         |
+| `contextTokens`    | `8192`        | The generative model's context window; sizes each prompt                                                          |
+| `charsPerToken`    | `3`           | Characters per token used to turn `contextTokens` into a character budget (conservative for English)              |
+| `maxSummaryTokens` | `400`         | Output tokens requested per summary                                                                               |
+| `memberChars`      | `2000`        | Characters of each memory (title and content) available to a prompt                                               |
+| `leafClusterSize`  | `15`          | Target memories per leaf topic                                                                                    |
+| `fanout`           | `10`          | Target topics per parent above the leaves                                                                         |
+| `topFloor`         | `6`           | Stop adding levels once a level has at most this many nodes                                                       |
+| `treeMinMembers`   | `40`          | A label set with at least this many memories gets a clustered tree                                                |
+| `flatMinMembers`   | `3`           | A label set with at least this many (and fewer than `treeMinMembers`) gets one summary; fewer get none            |
+| `dirtyMin`         | `2`           | A node is re-summarized after at least `max(dirtyMin, dirtyFraction × size)` member changes                       |
+| `dirtyFraction`    | `0.15`        | See `dirtyMin`                                                                                                    |
+| `rebuildGrowth`    | `2`           | Re-cluster a tree when its label set has grown or shrunk by this factor since the last clustering                 |
+| `debounceMs`       | `30000`       | Wait after a change before rebuilding, so a burst of writes costs one pass                                        |
+| `leaseMs`          | `300000`      | How long the runner lease lasts between renewals                                                                  |
+| `runner`           | `true`        | Whether this node rebuilds summaries. In a cluster without record-lock replication, leave it on for one node only |
+| `urlPath`          | `SummaryTree` | REST path of the expand endpoint                                                                                  |
+| `mcp`              | `false`       | Mount the `expand_summary` MCP tool on Harper's `/mcp` endpoint (needs Harper's MCP server enabled)               |
+
+## Permissions
+
+A memory belongs to one **partition**: its exact, sorted set of scope labels. Any set containing `global` is the
+`global` partition, since agent-memory lets a caller read a memory when any of its labels is readable. Each partition
+gets its own tree, so a summary only ever mixes memories that carry the same labels.
+
+Every node carries its partition's labels, and a caller sees it exactly when agent-memory's
+`canReadLabels(principal, labels)` is true: that is when the caller can read every memory in it. A reader of
+`customer:acme` never sees a node built from `customer:beta` memories. Every surface (orientation, annotations, the
+REST and MCP expand endpoints) resolves the caller with agent-memory's `resolvePrincipal` and applies that test; a
+node the caller cannot read answers 404, the same as one that does not exist.
+
+Withdrawn, superseded, expired, review-flagged (`needsReview`) and customer-content-flagged memories are left out of
+summaries until cleared. When a member is **withdrawn, content-flagged or moved to other labels**, its old partition
+is hidden from every surface in the same transaction that makes the change, and stays hidden until it is rebuilt
+without that memory; other partitions keep serving.
+
+## Freshness
+
+agent-memory calls the plugin's sink inside each memory change's transaction. The sink makes no model call: it
+updates the memory's assignment row (partition, topic, revision; no memory text) and appends a change row, both in the
+`memory` database, so they commit or roll back with the memory. A debounced runner then rebuilds only the partitions
+with pending changes, reading current memory text and vectors from agent-memory with `getMemories`:
+
+- Below `rebuildGrowth`, new memories join the nearest existing topic and node ids stay the same. A re-cluster matches
+  new topics to old ones by shared members and keeps their ids, so clients can hold on to a node id.
+- Summary text never outlives its sources: a node is rebuilt as soon as a memory it was built from is edited,
+  withdrawn, superseded, flagged, expired, marked for review or moved. New memories only wait: a node keeps its text,
+  with no model call, until at least `max(dirtyMin, dirtyFraction × size)` members have joined or changed.
+- Expiry (`validUntil`) has no event; the runner keeps one timer for the next expiry. Nothing runs while nothing is
+  pending.
+- On startup each worker walks agent-memory's memories (`scanMemories`) to catch changes made while the plugin was not
+  loaded, and serves nothing until that walk finishes.
+
+One worker runs the rebuilds at a time, under a lease checked again, under the runner's record lock, inside every
+publish transaction. With Harper's record-lock replication configured that lock is cluster-wide. **Without it, set
+`runner: false` on every node but one**: two nodes could otherwise both hold the lease within replication lag, and a
+publish from stale state can replicate over a newer one. Each node stops serving a hidden partition exactly when its
+own copy of agent-memory stops serving the memory: the change row replicates in the same transaction as the memory.
+
+## Cost
+
+| Event                                                                               | Model calls                                                                                             |
+| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Any memory write                                                                    | none; the sink adds one record lock, one read and two or three small writes to the memory's transaction |
+| New memory                                                                          | none until its leaf is dirty; no embedding while `embeddingModel` matches agent-memory's                |
+| Leaf crosses its dirty mark                                                         | one summary for the leaf, plus one per ancestor level (at most 2 for a few thousand memories)           |
+| Edit, withdraw, supersede, flag, expiry, review flag or move of a summarized memory | one summary for its leaf plus one per ancestor level                                                    |
+| Re-cluster (size ×2 or ÷2)                                                          | one per new or changed topic; topics that kept their members keep their text                            |
+
+`debounceMs` batches these: several changes to one leaf inside the window cost one call per affected node. The first
+build of a 2,000-memory partition makes about 150 calls (≈ n/15 leaves plus ≈ n/150 above them).
+
+Serving cost grows with the number of summarized label sets, not with memories: bootstrap reads every top node's
+labels and size, then for each node that fits the budget checks its partition for a pending revocation (one indexed
+lookup per partition, cached for the request) and reads its text. Measured 2026-11-13 (`scripts/bench-serving.mjs`,
+one Harper 5.4 worker, local): bootstrap p50 2.2 ms with 10 label sets and 8.6 ms with 1,000 (3,040 memories; 12.1 ms
+for a super user who reads all 1,000); search with annotations 5.0 ms and 5.5 ms. A memory write
+(`PUT /Memory/<id>`, 100 label sets) took 4.8 ms p50 without the plugin and 7.1 ms with it, using the fixtures' instant
+embedding model and with the runner rebuilding during the run; a real embedding call adds far more than either.
+
+## Endpoints
+
+- `GET /SummaryTree/` → `{ nodes: [...top nodes the caller can read, largest first, at most 200], truncated, pending }`. `pending` is true while a readable
+  partition has changes not yet applied; it reads at most 1,000 pending changes, so behind a larger backlog it can be
+  false early.
+- `GET /SummaryTree/<id>` → `{ node, children }` for a node with subtopics, `{ node, members: [{ id, title }] }` for a
+  leaf. A node is `{ id, title, summary, level, memberCount, parentId }`.
+- MCP `expand_summary { id? }` → the same as the two routes above.
+- Search hits gain `summaryTree: { id, title, summary, level, memberCount, parentId }`.
+- Bootstrap's `orientation` items are `{ title, content: "<summary>\n(<n> memories; summary node <id>)" }`.
+
+## Evaluation
+
+`scripts/eval-orientation.mjs` seeds a synthetic corpus (30 topics, 255 memories, skewed topic sizes) into a local
+Harper with real models and counts the topics named in bootstrap's output at a fixed budget. Without orientation that
+is the caller's recent memories; with it, the orientation section first. Measured 2026-11-13 with
+`llama3.2:3b-ctx8k` and `nomic-embed-text` on Ollama:
+
+| Budget (chars) | Topics covered without | Topics covered with |
+| -------------- | ---------------------- | ------------------- |
+| 2,000          | 7 / 30                 | 16 / 30             |
+| 4,000          | 11 / 30                | 21 / 30             |
+| 8,000          | 16 / 30                | 24 / 30             |
+
+## Development
 
 ```sh
-harper dev /path/to/harper-summary-tree
-# write content
-curl -X PUT https://localhost:9926/Chunk/doc1-0 -u admin:pw \
-  -H content-type:application/json \
-  -d '{"text": "...", "source": "doc1.md", "title": "Doc 1 §intro"}'
-# ...the tree builds/updates itself; then:
-curl -k "https://localhost:9926/RagSearch?q=how%20does%20replication%20work&limit=10"
-curl -k  https://localhost:9926/TreeStatus
+npm install
+npm test                 # build + unit tests (in-memory Harper and agent-memory stand-ins)
+npm run test:integration # packs the plugin, runs agent-memory and this plugin as two apps on a real Harper
+npm run eval:orientation # needs local models; see the script's header
 ```
 
-`scripts/load-corpus.js` bulk-loads a JSONL corpus through the REST write path
-(embedding runs server-side).
+The integration fixtures install the agent-memory version this checkout has in `node_modules` (or `AGENT_MEMORY_TARBALL`).
 
-## Tuning
-
-| constant (resources.js) | default | meaning |
-|---|---|---|
-| `TARGET_CLUSTER_SIZE` | 15 | chunks per level-1 cluster (k = n/15) |
-| `HIGHER_FANOUT` / `TOP_FLOOR` | 10 / 6 | recursion shape above level 1 |
-| `MIN_CHUNKS_FOR_TREE` | 40 | below this, stay flat |
-| `DIRTY_MIN` / `DIRTY_FRACTION` | 2 / 0.15 | re-summarize threshold per cluster |
-| `REBUILD_GROWTH` | 2 | full re-cluster after corpus doubles |
-| `MAINTENANCE_INTERVAL_MS` | 30s | periodic pass cadence |
-
-## Demo-environment notes (from the live run)
-
-- **Ollama context window**: the Harper ollama backend passes only `temperature`/`maxTokens`
-  — it cannot set `num_ctx`, and ollama's 2048-token default **silently truncates** long
-  summarization prompts (symptom: meta-language titles like "Based on the provided code…"
-  on large clusters only). Fix: `ollama create llama3.2:3b-ctx8k -f <Modelfile with
-  PARAMETER num_ctx 8192>` and reference that model in the config.
-- On a shared dev box, give the instance unique ports:
-  `--HTTP_PORT=127.0.0.1:19926 --OPERATIONSAPI_NETWORK_PORT=127.0.0.1:19925
-  --MQTT_NETWORK_PORT=127.0.0.1:11883 --MQTT_NETWORK_SECUREPORT=127.0.0.1:18884`
-  (note: explicit `HTTP_PORT` serves plain HTTP; the secure ops listener still defaults
-  to 9925 — non-fatal if taken).
-- `harper dev` watches the app directory: **any file edit restarts the app mid-build**.
-  The `builtAt` completion marker exists precisely so interrupted builds rebuild.
-
-## Known limits / core frictions (tracked in #1244)
-
-1. **Bulk vector access**: the build loop iterates records to collect embeddings
-   (decodes whole records for one attribute). The HNSW index store holds int8-quantized
-   copies that reconstruct at ~1% error — adequate for clustering (measured: perturbs
-   k-means less than its own seed instability) — but there is no supported scan API yet.
-   Fine to low-hundreds-of-thousands of rows; sample-based k-means beyond that.
-2. **Query-time embedding**: `RagSearch` embeds the query itself; the search path has no
-   text→vector integration.
-3. **No scheduler primitive**: the maintenance pass self-schedules with `setInterval`
-   plus a lease row (`TreeState`) so only one worker runs it.
-4. **Multi-node**: the tree builds on whichever node holds the lease; `Summary` rows
-   replicate like any table. Subscription-driven assignment runs node-locally.
-5. Deletes rely on the periodic sweep/dirty pass rather than exact event-time
-   bookkeeping (the delete event doesn't carry the old `summaryId`).
+See [DESIGN.md](DESIGN.md) for the invariants the code relies on.

@@ -1,14 +1,14 @@
 /**
- * Spherical k-means (k-means++ init, deterministic seed) for the summary-tree
- * build loop. Pure module — no Harper imports — so it is unit-testable.
- *
- * Works on unit-normalized vectors with cosine similarity. Small corpora
- * (up to low hundreds of thousands of vectors) cluster fine in-process;
- * beyond that, sample-based k-means over a subset is the intended pattern.
+ * Spherical k-means (k-means++ init, deterministic seed) over unit-normalized vectors with cosine similarity.
+ * It yields to the event loop every `YIELD_EVERY` vector comparisons, so clustering a large partition does not
+ * stall the Harper worker that runs it.
  */
 
-/** Deterministic PRNG (mulberry32) so rebuilds are reproducible. */
-function rng(seed) {
+export type Vector = Float32Array | readonly number[];
+
+const YIELD_EVERY = 2_000_000;
+
+function rng(seed: number): () => number {
 	let a = seed;
 	return () => {
 		a |= 0;
@@ -19,7 +19,7 @@ function rng(seed) {
 	};
 }
 
-export function normalize(v) {
+export function normalize(v: Vector): Float32Array {
 	let s = 0;
 	for (let d = 0; d < v.length; d++) s += v[d] * v[d];
 	s = 1 / Math.sqrt(s || 1);
@@ -28,14 +28,13 @@ export function normalize(v) {
 	return out;
 }
 
-export function dot(a, b) {
+export function dot(a: Vector, b: Vector): number {
 	let s = 0;
 	for (let d = 0; d < a.length; d++) s += a[d] * b[d];
 	return s;
 }
 
-/** Index of the nearest centroid (cosine) — also the incremental-assignment primitive. */
-export function nearestCentroid(vec, centroids) {
+export function nearestCentroid(vec: Vector, centroids: readonly Vector[]): { index: number; similarity: number } {
 	let best = 0;
 	let bestSim = -2;
 	for (let c = 0; c < centroids.length; c++) {
@@ -48,22 +47,46 @@ export function nearestCentroid(vec, centroids) {
 	return { index: best, similarity: bestSim };
 }
 
+export function centroidOf(vectors: readonly Vector[]): Float32Array {
+	const dims = vectors[0].length;
+	const sum = new Float64Array(dims);
+	for (const v of vectors) for (let d = 0; d < dims; d++) sum[d] += v[d];
+	return normalize(Array.from(sum, (x) => x / vectors.length));
+}
+
+class Yielder {
+	#work = 0;
+	async add(units: number): Promise<void> {
+		this.#work += units;
+		if (this.#work < YIELD_EVERY) return;
+		this.#work = 0;
+		await new Promise((resolve) => setImmediate(resolve));
+	}
+}
+
+export interface KmeansOptions {
+	seed?: number;
+	iterations?: number;
+	/** clusters smaller than this are merged into their nearest surviving neighbor */
+	minClusterSize?: number;
+}
+
 /**
- * @param vectors  array of (already normalized) Float32Array/number[]
- * @param k        cluster count
- * @param opts     { seed, iterations, minClusterSize } — tiny clusters are merged
- *                 into their nearest surviving neighbor
- * @returns { assignments: Int32Array, centroids: Float32Array[] } — centroids of
- *          emptied (merged-away) clusters are removed and assignments compacted.
+ * @param vectors already-normalized vectors
+ * @returns assignments into the returned centroids; emptied (merged-away) clusters are removed and compacted
  */
-export function kmeans(vectors, k, { seed = 1244, iterations = 40, minClusterSize = 4 } = {}) {
+export async function kmeans(
+	vectors: readonly Vector[],
+	k: number,
+	{ seed = 1244, iterations = 40, minClusterSize = 4 }: KmeansOptions = {},
+): Promise<{ assignments: Int32Array; centroids: Float32Array[] }> {
 	const n = vectors.length;
 	const dims = vectors[0].length;
-	k = Math.min(k, n);
+	k = Math.max(1, Math.min(k, n));
 	const rand = rng(seed);
+	const yielder = new Yielder();
 
-	// k-means++ init on cosine distance
-	const centroids = [vectors[(rand() * n) | 0]];
+	const centroids: Vector[] = [vectors[(rand() * n) | 0]];
 	const d2 = new Float64Array(n).fill(Infinity);
 	while (centroids.length < k) {
 		const c = centroids[centroids.length - 1];
@@ -73,6 +96,7 @@ export function kmeans(vectors, k, { seed = 1244, iterations = 40, minClusterSiz
 			if (d * d < d2[i]) d2[i] = d * d;
 			sum += d2[i];
 		}
+		await yielder.add(n * dims);
 		let r = rand() * sum;
 		let pick = 0;
 		for (let i = 0; i < n; i++) {
@@ -94,9 +118,9 @@ export function kmeans(vectors, k, { seed = 1244, iterations = 40, minClusterSiz
 				assignments[i] = index;
 				moved++;
 			}
+			await yielder.add(k * dims);
 		}
 		if (!moved && iter > 0) break;
-		// recompute + renormalize; respawn empty clusters on the worst-fit point
 		const sums = Array.from({ length: k }, () => new Float64Array(dims));
 		const counts = new Int32Array(k);
 		for (let i = 0; i < n; i++) {
@@ -106,6 +130,7 @@ export function kmeans(vectors, k, { seed = 1244, iterations = 40, minClusterSiz
 		}
 		for (let c = 0; c < k; c++) {
 			if (!counts[c]) {
+				// respawn an empty cluster on the worst-fit point
 				let worst = 0;
 				let worstSim = 2;
 				for (let i = 0; i < n; i++) {
@@ -124,7 +149,6 @@ export function kmeans(vectors, k, { seed = 1244, iterations = 40, minClusterSiz
 		}
 	}
 
-	// merge tiny clusters into nearest surviving centroid
 	const counts = new Int32Array(k);
 	for (let i = 0; i < n; i++) counts[assignments[i]]++;
 	const tiny = new Set([...counts.keys()].filter((c) => counts[c] > 0 && counts[c] < minClusterSize));
@@ -145,31 +169,15 @@ export function kmeans(vectors, k, { seed = 1244, iterations = 40, minClusterSiz
 		}
 	}
 
-	// compact away empty/merged slots
 	const remap = new Int32Array(k).fill(-1);
-	const outCentroids = [];
+	let survivors = 0;
 	const finalCounts = new Int32Array(k);
 	for (let i = 0; i < n; i++) finalCounts[assignments[i]]++;
-	for (let c = 0; c < k; c++) {
-		if (finalCounts[c]) {
-			remap[c] = outCentroids.length;
-			outCentroids.push(centroids[c]);
-		}
-	}
-	// recompute means for merged clusters so stored centroids match final membership
-	const dims2 = vectors[0].length;
-	const sums = outCentroids.map(() => new Float64Array(dims2));
-	const cnts = new Int32Array(outCentroids.length);
+	for (let c = 0; c < k; c++) if (finalCounts[c]) remap[c] = survivors++;
+	const members: Vector[][] = Array.from({ length: survivors }, () => []);
 	for (let i = 0; i < n; i++) {
 		assignments[i] = remap[assignments[i]];
-		cnts[assignments[i]]++;
-		const s = sums[assignments[i]];
-		for (let d = 0; d < dims2; d++) s[d] += vectors[i][d];
+		members[assignments[i]].push(vectors[i]);
 	}
-	for (let c = 0; c < outCentroids.length; c++) {
-		const cf = new Float32Array(dims2);
-		for (let d = 0; d < dims2; d++) cf[d] = sums[c][d] / cnts[c];
-		outCentroids[c] = normalize(cf);
-	}
-	return { assignments, centroids: outCentroids };
+	return { assignments, centroids: members.map(centroidOf) };
 }

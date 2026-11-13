@@ -1,0 +1,72 @@
+# In agent-memory's `memory` database, so a sink's writes commit or roll back with the memory and replicate with it.
+# Not exported: every read goes through the plugin's routes, which authorize with agent-memory's principal.
+
+# Written only by the sink and the startup walk: the partition a memory was last in, so a later change can revoke it.
+# No memory text; the runner reads that from agent-memory with getMemories.
+type SummaryMember @table(database: "memory") {
+	id: ID @primaryKey
+	partition: String @indexed
+	labels: [String]
+	revision: Int
+	status: String
+	flagged: Boolean
+	eligible: Boolean
+	contentHash: String
+	validUntil: Date @indexed
+}
+
+# Written only by the runner: which leaf each eligible member was last assigned to.
+type SummaryAssignment @table(database: "memory") {
+	id: ID @primaryKey
+	partition: String @indexed
+	leafId: String @indexed
+}
+
+type SummaryNode @table(database: "memory") {
+	id: ID @primaryKey
+	partition: String @indexed
+	labels: [String]
+	level: Int
+	parentId: String @indexed
+	top: Boolean @indexed
+	title: String
+	summary: String
+	textChars: Int
+	memberCount: Int
+	centroid: [Float]
+	# leaf: memberId@revision it was summarized from; interior: child ids
+	builtFrom: [String]
+	# every memory whose text this node's summary was derived from, directly or through children
+	sourceIds: [String] @indexed
+	summarizedAt: Date
+	# earliest validUntil among the memories its text came from; serving stops at it
+	expiresAt: Date
+}
+
+# Append-only work queue. A row with revoke: true hides its whole partition until a pass absorbs it.
+type SummaryChange @table(database: "memory") {
+	id: ID @primaryKey
+	partition: String @indexed
+	labels: [String]
+	memoryId: String
+	revision: Int
+	revoke: Boolean @indexed
+	# the partition, on revoking rows only, so a barrier check is one index lookup
+	revokePartition: String @indexed
+	createdAt: Date
+}
+
+type SummaryPartition @table(database: "memory") {
+	id: ID @primaryKey
+	labels: [String]
+	clusteredSize: Int
+	embeddingModel: String
+	clusteredAt: Date
+}
+
+type SummaryState @table(database: "memory") {
+	id: ID @primaryKey
+	leaseHolder: String
+	leaseUntil: Float
+	checkedUntil: Date
+}

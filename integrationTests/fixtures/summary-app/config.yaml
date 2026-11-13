@@ -1,0 +1,12 @@
+# Small sizes so a few memories make a tree.
+rest: true
+
+'@harperfast/summary-tree':
+  package: '@harperfast/summary-tree'
+  mcp: true
+  treeMinMembers: 12
+  leafClusterSize: 4
+  fanout: 2
+  topFloor: 2
+  debounceMs: 1500
+  leaseMs: 60000

@@ -13,7 +13,8 @@ cost and endpoints are in [README.md](README.md).
   rows, all through the sink's `context` in the `memory` database, so they commit or roll back with the memory. No
   model call, no node read.
 - **Member rows are written under their node-scoped record lock** (`lockRow`) by the sink, the startup walk and the
-  runner's leaf assignment. The walk skips a scanned row recorded at a later revision, or at the same revision in
+  runner's leaf assignment. The runner writes only `leafId` and the expiry fields, as a patch, so it never writes back
+  a stale copy of lifecycle fields another node's sink changed. The walk skips a scanned row recorded at a later revision, or at the same revision in
   the same state (two nodes can write one revision), so a walk that read revision N cannot overwrite a sink's N+1. The sink takes this lock after agent-memory's `Memory` locks;
   no member-row writer holds a `Memory` lock, so there is no cycle.
 - **A member row keeps its `partition`, `status` and `flagged` after the memory becomes ineligible**: a later change
@@ -33,10 +34,10 @@ cost and endpoints are in [README.md](README.md).
   for another reason, and the later withdrawal must still revoke.
 - **Each serving request reads in one snapshot** (`inSnapshot`, `src/serve.ts`): Harper gives every read in one
   transaction on one database a consistent snapshot, so a request's barrier decisions and the summary text it returns
-  are one point in time. Within it, serving reads node metadata without text, checks the partition's barrier
-  (`Barriers.read`), then reads the node. The check is one query for every pending revoke
-  while at most 64 are pending, else an indexed probe (`partition`, `revoke`) per partition, at most 64 per request;
-  partitions past that are treated as hidden.
+  are one point in time. Within it, serving reads node metadata without text, skips a node that cannot fit
+  the budget (`textChars`), checks the node's partition for a pending revoke (`Barriers`: one indexed lookup per
+  partition, memoized for the request, never capped, so one tenant's burst hides nothing of another's), then reads
+  the node.
 - **Hiding is replica-local, like agent-memory's own reads.** The change row is written in the memory's transaction
   in the same database, so a node stops serving the partition when that replica of the memory changes. No serving
   path waits on another node.

@@ -121,10 +121,10 @@ own copy of agent-memory stops serving the memory: the change row replicates in 
 build of a 2,000-memory partition makes about 150 calls (≈ n/15 leaves plus ≈ n/150 above them).
 
 Serving cost grows with the number of summarized label sets, not with memories: bootstrap reads every top node's
-labels, checks pending revocations (one query, or at most 64 indexed probes during a burst of more than 64), then reads
-the text of what it emits. Measured 2026-11-13 (`scripts/bench-serving.mjs`, one Harper 5.4 worker, local): bootstrap
-p50 2.1 ms with 10 label sets and 8.8 ms with 1,000 (3,040 memories; 13.5 ms for a super user who reads all 1,000);
-search with annotations 5.5 ms in both. A memory write
+labels and size, then for each node that fits the budget checks its partition for a pending revocation (one indexed
+lookup per partition, cached for the request) and reads its text. Measured 2026-11-13 (`scripts/bench-serving.mjs`,
+one Harper 5.4 worker, local): bootstrap p50 2.2 ms with 10 label sets and 8.6 ms with 1,000 (3,040 memories; 12.1 ms
+for a super user who reads all 1,000); search with annotations 5.0 ms and 5.5 ms. A memory write
 (`PUT /Memory/<id>`, 100 label sets) took 4.8 ms p50 without the plugin and 7.1 ms with it, using the fixtures' instant
 embedding model and with the runner rebuilding during the run; a real embedding call adds far more than either.
 

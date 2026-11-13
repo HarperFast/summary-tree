@@ -25,6 +25,7 @@ type SummaryNode @table(database: "memory") {
 	top: Boolean @indexed
 	title: String
 	summary: String
+	textChars: Int
 	memberCount: Int
 	centroid: [Float]
 	# leaf: memberId@revision it was summarized from; interior: child ids

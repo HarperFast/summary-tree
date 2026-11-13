@@ -404,6 +404,7 @@ export class Runner {
 				content = {
 					title,
 					summary,
+					textChars: title.length + summary.length,
 					builtFrom: leaf ? node.memberIds.map((id) => memberRef(revisionOf.get(id)!)) : node.childIds,
 					sourceIds: leaf ? node.memberIds : [...new Set(children.flatMap((child) => child.sourceIds as string[]))],
 					summarizedAt: new Date(),
@@ -413,6 +414,7 @@ export class Runner {
 				content = {
 					title: kept.title,
 					summary: kept.summary,
+					textChars: kept.title.length + kept.summary.length,
 					builtFrom: kept.builtFrom,
 					sourceIds: kept.sourceIds,
 					summarizedAt: kept.summarizedAt,
@@ -468,10 +470,10 @@ export class Runner {
 				const stored = await SummaryMember.get(update.id, txn);
 				if (!stored || stored.partition !== partition) return;
 				const expire = update.expire && stored.eligible && isExpired(stored.validUntil, Date.now());
-				await SummaryMember.put(
-					expire
-						? { ...stored, eligible: false, leafId: null, validUntil: null }
-						: { ...stored, leafId: update.leafId },
+				// a patch, so a lifecycle write from another node's sink is not overwritten with this node's copy
+				await SummaryMember.patch(
+					update.id,
+					expire ? { eligible: false, leafId: null, validUntil: null } : { leafId: update.leafId },
 					txn,
 				);
 			});

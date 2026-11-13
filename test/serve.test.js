@@ -122,7 +122,7 @@ test('expanding returns children of an interior node and member ids of a leaf; u
 	await assert.rejects(expandNode(globalReader, 'missing'), { statusCode: 404 });
 });
 
-test('past the prefetch limit, barriers are probed per partition', async () => {
+test('barriers are probed per partition', async () => {
 	for (let i = 0; i < 70; i++) {
 		await SummaryChange.put({ id: `other-${i}`, partition: `p${i}`, revoke: true, memoryId: `m${i}` });
 	}
@@ -135,11 +135,11 @@ test('past the prefetch limit, barriers are probed per partition', async () => {
 	await assert.rejects(expandNode(acmeReader, 'acme-1'), { statusCode: 404 });
 });
 
-test('past the prefetch limit, at most 64 partitions are probed per request and the rest stay hidden', async () => {
+test("a burst of revocations in other partitions never hides a reader's healthy partitions", async () => {
 	for (let i = 0; i < 70; i++) {
 		await SummaryChange.put({ id: `other-${i}`, partition: `p${i}`, revoke: true, memoryId: `m${i}` });
 		await node(`n${i}`, [`team:t${i}`], { memberCount: 100 + i });
 	}
 	const served = await readableTopNodes(admin);
-	assert.ok(served.length <= 64, `served ${served.length}`);
+	assert.equal(served.length, 74, 'every healthy partition is served');
 });

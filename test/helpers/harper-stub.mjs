@@ -49,6 +49,10 @@ class Table {
 		if (pending) pending.set(`${this.name}\0${record.id}`, { table: this.name, id: record.id, record: clone(record) });
 		else commitOne(this.name, record.id, clone(record));
 	}
+	async patch(id, partial, context) {
+		const current = (await this.get(id, context)) ?? { id };
+		await this.put({ ...structuredClone(current), ...partial, id }, context);
+	}
 	async delete(id, context) {
 		const pending = pendingOf(context);
 		if (pending) pending.set(`${this.name}\0${id}`, { table: this.name, id, record: null });

@@ -24,17 +24,13 @@ async function collect<T = any>(iterable: any): Promise<T[]> {
 	return rows;
 }
 
-const BARRIER_PREFETCH = 64;
-const PROBE_LIMIT = 64;
-const META = ['id', 'partition', 'labels', 'level', 'parentId', 'top', 'memberCount'];
+const META = ['id', 'partition', 'labels', 'level', 'parentId', 'top', 'memberCount', 'textChars'];
 
 /**
- * Pending revoking changes for one request, consulted before any summary text is read: one query while at most
- * BARRIER_PREFETCH are pending, else an indexed probe per partition, at most PROBE_LIMIT of them; partitions past
- * that count as hidden.
+ * Pending revoking changes for one request: an indexed probe per partition the request is about to serve, memoized,
+ * consulted before that partition's summary text is read.
  */
 export class Barriers {
-	#known: Promise<Set<string> | undefined> | undefined;
 	#probed = new Map<string, Promise<boolean>>();
 	readonly txn: object;
 
@@ -43,41 +39,22 @@ export class Barriers {
 		this.txn = txn;
 	}
 
-	prefetch(): Promise<Set<string> | undefined> {
-		this.#known ??= collect(
-			summaryTables().SummaryChange.search(
-				{
-					conditions: [{ attribute: 'revoke', value: true }],
-					select: ['partition'],
-					limit: BARRIER_PREFETCH + 1,
-				},
-				this.txn,
-			),
-		).then((rows) => (rows.length > BARRIER_PREFETCH ? undefined : new Set(rows.map((row) => row.partition))));
-		return this.#known;
-	}
-
-	async isBlocked(partition: string): Promise<boolean> {
-		const known = await this.prefetch();
-		if (known) return known.has(partition);
+	isBlocked(partition: string): Promise<boolean> {
 		let blocked = this.#probed.get(partition);
 		if (blocked === undefined) {
-			blocked =
-				this.#probed.size >= PROBE_LIMIT
-					? Promise.resolve(true)
-					: collect(
-							summaryTables().SummaryChange.search(
-								{
-									conditions: [
-										{ attribute: 'partition', value: partition },
-										{ attribute: 'revoke', value: true },
-									],
-									select: ['id'],
-									limit: 1,
-								},
-								this.txn,
-							),
-						).then((rows) => rows.length > 0);
+			blocked = collect(
+				summaryTables().SummaryChange.search(
+					{
+						conditions: [
+							{ attribute: 'partition', value: partition },
+							{ attribute: 'revoke', value: true },
+						],
+						select: ['id'],
+						limit: 1,
+					},
+					this.txn,
+				),
+			).then((rows) => rows.length > 0);
 			this.#probed.set(partition, blocked);
 		}
 		return blocked;
@@ -135,7 +112,6 @@ function view(node: any): NodeView {
 
 export function readableTopNodes(principal: Principal): Promise<NodeView[]> {
 	return inSnapshot(async (barriers) => {
-		await barriers.prefetch();
 		const tops = (await metaSearch([{ attribute: 'top', value: true }], barriers.txn))
 			.filter(readableMeta(principal))
 			.sort(bySize);
@@ -157,11 +133,12 @@ export async function hasPendingWork(principal: Principal): Promise<boolean> {
 	return false;
 }
 
+function itemSuffix(node: { memberCount: number; id: string }): string {
+	return `\n(${node.memberCount} memories; summary node ${node.id})`;
+}
+
 export function orientationItem(node: NodeView): { title: string; content: string } {
-	return {
-		title: node.title,
-		content: `${node.summary}\n(${node.memberCount} memories; summary node ${node.id})`,
-	};
+	return { title: node.title, content: `${node.summary}${itemSuffix(node)}` };
 }
 
 const MAX_ORIENTATION_ITEMS = 64;
@@ -175,7 +152,6 @@ export function orientation(principal: Principal, budgetChars: number) {
 }
 
 async function orientationIn(barriers: Barriers, principal: Principal, budgetChars: number) {
-	await barriers.prefetch();
 	const items: { title: string; content: string }[] = [];
 	let remaining = budgetChars;
 	let level = (await metaSearch([{ attribute: 'top', value: true }], barriers.txn))
@@ -185,6 +161,8 @@ async function orientationIn(barriers: Barriers, principal: Principal, budgetCha
 		const next: any[] = [];
 		for (const meta of level) {
 			if (items.length >= MAX_ORIENTATION_ITEMS) break;
+			// the size check needs no text, so a node that cannot fit costs no probe and no read
+			if ((meta.textChars ?? 0) + itemSuffix(meta).length > remaining) continue;
 			const node = await barriers.read(meta, principal);
 			if (!node) continue;
 			const item = orientationItem(view(node));
@@ -215,7 +193,6 @@ async function annotateIn(
 	hits: readonly Readonly<Record<string, unknown>>[],
 ): Promise<Map<string, NodeView>> {
 	const { SummaryMember } = summaryTables();
-	await barriers.prefetch();
 	const members = await Promise.all(hits.map((hit) => SummaryMember.get(hit.id as string, barriers.txn)));
 	const leafIds = [...new Set(members.filter((member) => member?.eligible && member.leafId).map((m) => m.leafId))];
 	const leaves = new Map<string, any>();

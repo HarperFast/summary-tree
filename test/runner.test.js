@@ -156,3 +156,34 @@ test('the publish transaction takes the runner lock before checking the lease', 
 	assert.ok(locks.length >= 3, 'acquire, renew and publish');
 	assert.ok(locks.every((call) => call.inTransaction));
 });
+
+test('a memory moved to another label set on another node revokes the partition that still holds its text', async () => {
+	await startWith([1, 2, 3, 4, 5].map((n) => memory(n)));
+	const acmeNode = rows('SummaryNode')[0];
+	// what replication leaves when another node moved memory 5 to customer:beta: no sink here revoked customer:acme
+	const moved = memory(5, { scopes: ['customer:beta'], revision: 2 });
+	memoryStore.set(moved.id, moved);
+	const BETA = partitionId(['customer:beta']);
+	await databases.memory.SummaryMember.put({
+		...rows('SummaryMember').find((m) => m.id === moved.id),
+		partition: BETA,
+		labels: ['customer:beta'],
+		revision: 2,
+		leafId: null,
+	});
+	await databases.memory.SummaryChange.put({
+		id: 'replicated',
+		partition: BETA,
+		labels: ['customer:beta'],
+		memoryId: moved.id,
+		revision: 2,
+		revoke: false,
+	});
+	modelState.onGenerate = async () => {};
+	await runner.tick();
+	assert.ok(acmeNode.sourceIds.includes(moved.id));
+	await until('customer:acme to be rebuilt without the moved memory', async () => {
+		const node = rows('SummaryNode').find((n) => n.partition === ACME);
+		return node && !node.sourceIds.includes(moved.id) && rows('SummaryChange').length === 0;
+	});
+});

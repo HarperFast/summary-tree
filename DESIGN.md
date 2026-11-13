@@ -31,9 +31,17 @@ cost and endpoints are in [README.md](README.md).
   when the memory was withdrawn, newly content-flagged, or moved to another label set, judged against the stored
   member, not its eligibility (`revokesFrom`): a summary may still carry text from a member that became ineligible
   for another reason, and the later withdrawal must still revoke.
+- **Barriers are read before the text they guard** (`Barriers`, `src/serve.ts`): one query for every pending revoke
+  while at most 64 are pending, else an indexed probe (`partition`, `revoke`) per partition the request touches. Expand
+  probes its node's partition, then re-reads the node.
 - **Hiding is replica-local, like agent-memory's own reads.** The change row is written in the memory's transaction
   in the same database, so a node stops serving the partition when that replica of the memory changes. No serving
   path waits on another node.
+- **A sink only sees its own node's writes.** Two nodes moving one memory to different label sets at once each revoke
+  the partition they saw it leave; after replication, one partition may still hold its text with no revoke. The
+  runner closes that: for each memory whose change it processes, any node in another partition whose `sourceIds`
+  name it, where it is no longer an eligible member, gets a revoke change (`#orphanedPartitions`). The window is
+  replication lag plus one pass; agent-memory's `lockScope: cluster` prevents the concurrent writes.
 - **A worker serves nothing until its startup walk finishes** (`Runner.ready`), so a change made while the plugin was
   not loaded is recorded, and its partition hidden if it revokes, before any summary is served.
 

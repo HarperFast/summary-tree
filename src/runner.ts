@@ -296,6 +296,7 @@ export class Runner {
 			SummaryChange.search({ conditions: [{ attribute: 'partition', value: partition }] }),
 		);
 		const revoked = new Set<string>(changes.filter((change) => change.revoke).map((change) => change.memoryId));
+		const orphaned = await this.#orphanedPartitions(changes, partition);
 		const now = Date.now();
 		const rows = (
 			await collect<any>(SummaryMember.search({ conditions: [{ attribute: 'partition', value: partition }] }))
@@ -431,6 +432,20 @@ export class Runner {
 			} else if (meta) {
 				await SummaryPartition.delete(partition, txn);
 			}
+			for (const [other, row] of orphaned) {
+				await SummaryChange.put(
+					{
+						id: randomUUID(),
+						partition: other,
+						labels: row.labels,
+						memoryId: row.memoryId,
+						revision: row.revision,
+						revoke: true,
+						createdAt: new Date(),
+					},
+					txn,
+				);
+			}
 		});
 
 		// One member lock per transaction, like every writer but the sink. The changes are deleted only after these, so
@@ -460,6 +475,28 @@ export class Runner {
 			await this.#assertLease(txn);
 			for (const change of changes) await SummaryChange.delete(change.id, txn);
 		});
+	}
+
+	/**
+	 * Other partitions whose summaries still carry text from a memory changed here, though it is no longer an eligible
+	 * member of them. A sink revokes only the partition its own node saw the memory leave; two nodes moving one memory
+	 * to different label sets at once can leave text in a partition no sink revoked.
+	 */
+	async #orphanedPartitions(changes: readonly any[], partition: string): Promise<Map<string, any>> {
+		const { SummaryMember, SummaryNode } = summaryTables();
+		const orphaned = new Map<string, any>();
+		for (const memoryId of new Set<string>(changes.map((change) => change.memoryId))) {
+			const member = await SummaryMember.get(memoryId);
+			for await (const node of await SummaryNode.search({
+				conditions: [{ attribute: 'sourceIds', value: memoryId }],
+				select: ['partition', 'labels'],
+			})) {
+				if (node.partition === partition || orphaned.has(node.partition)) continue;
+				if (member?.eligible && member.partition === node.partition) continue;
+				orphaned.set(node.partition, { labels: node.labels, memoryId, revision: member?.revision ?? 0 });
+			}
+		}
+		return orphaned;
 	}
 
 	/** agent-memory's stored vectors when they come from this plugin's embedding model; others are embedded once. */

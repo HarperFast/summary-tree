@@ -121,3 +121,16 @@ test('expanding returns children of an interior node and member ids of a leaf; u
 	await assert.rejects(expandNode(globalReader, 'acme-1'), { statusCode: 404 });
 	await assert.rejects(expandNode(globalReader, 'missing'), { statusCode: 404 });
 });
+
+test('past the prefetch limit, barriers are probed per partition', async () => {
+	for (let i = 0; i < 70; i++) {
+		await SummaryChange.put({ id: `other-${i}`, partition: `p${i}`, revoke: true, memoryId: `m${i}` });
+	}
+	assert.deepEqual(
+		(await readableTopNodes(acmeReader)).map((n) => n.id),
+		['global-1', 'acme-1', 'acme-beta-1'],
+	);
+	await SummaryChange.put({ id: 'acme-r', partition: partitionId(['customer:acme']), revoke: true, memoryId: 'm-x' });
+	assert.ok(!(await readableTopNodes(acmeReader)).some((n) => n.id === 'acme-1'));
+	await assert.rejects(expandNode(acmeReader, 'acme-1'), { statusCode: 404 });
+});

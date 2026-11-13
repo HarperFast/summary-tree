@@ -23,26 +23,49 @@ async function collect<T = any>(iterable: any): Promise<T[]> {
 	return rows;
 }
 
-const BARRIER_SCAN_LIMIT = 10_000;
+const BARRIER_PREFETCH = 64;
 
 /**
- * Partitions hidden by a pending revoking change, read once per request. A backlog past BARRIER_SCAN_LIMIT hides
- * every partition rather than costing a query per partition.
+ * Partitions hidden by a pending revoking change, for one request: one query while at most BARRIER_PREFETCH are
+ * pending, else an indexed probe per partition asked about, memoized.
  */
 export class Barriers {
-	#blocked: Promise<Set<string> | 'all'> | undefined;
+	#known: Promise<Set<string> | undefined> | undefined;
+	#probed = new Map<string, Promise<boolean>>();
 
-	async isBlocked(partition: string): Promise<boolean> {
-		const { SummaryChange } = summaryTables();
-		this.#blocked ??= collect(
-			SummaryChange.search({
+	/** Reads the pending set; call before reading the node text it will guard. */
+	prefetch(): Promise<Set<string> | undefined> {
+		this.#known ??= collect(
+			summaryTables().SummaryChange.search({
 				conditions: [{ attribute: 'revoke', value: true }],
 				select: ['partition'],
-				limit: BARRIER_SCAN_LIMIT + 1,
+				limit: BARRIER_PREFETCH + 1,
 			}),
-		).then((rows) => (rows.length > BARRIER_SCAN_LIMIT ? 'all' : new Set(rows.map((row) => row.partition))));
-		const blocked = await this.#blocked;
-		return blocked === 'all' || blocked.has(partition);
+		).then((rows) => (rows.length > BARRIER_PREFETCH ? undefined : new Set(rows.map((row) => row.partition))));
+		return this.#known;
+	}
+
+	async isBlocked(partition: string): Promise<boolean> {
+		const known = await this.prefetch();
+		return known ? known.has(partition) : this.probe(partition);
+	}
+
+	probe(partition: string): Promise<boolean> {
+		let blocked = this.#probed.get(partition);
+		if (blocked === undefined) {
+			blocked = collect(
+				summaryTables().SummaryChange.search({
+					conditions: [
+						{ attribute: 'partition', value: partition },
+						{ attribute: 'revoke', value: true },
+					],
+					select: ['id'],
+					limit: 1,
+				}),
+			).then((rows) => rows.length > 0);
+			this.#probed.set(partition, blocked);
+		}
+		return blocked;
 	}
 }
 
@@ -87,6 +110,7 @@ function view(node: any): NodeView {
 
 export async function readableTopNodes(principal: Principal, barriers = new Barriers()): Promise<NodeView[]> {
 	const { SummaryNode } = summaryTables();
+	await barriers.prefetch();
 	const tops = await collect(SummaryNode.search({ conditions: [{ attribute: 'top', value: true }] }));
 	return (await filterServable(tops, principal, barriers)).sort(bySize).map(view);
 }
@@ -121,6 +145,7 @@ const MAX_ORIENTATION_ITEMS = 64;
 export async function orientation(principal: Principal, budgetChars: number) {
 	const { SummaryNode } = summaryTables();
 	const barriers = new Barriers();
+	await barriers.prefetch();
 	const items: { title: string; content: string }[] = [];
 	let remaining = budgetChars;
 	const tops = await collect(SummaryNode.search({ conditions: [{ attribute: 'top', value: true }] }));
@@ -150,6 +175,7 @@ export async function annotateHits(
 ): Promise<Map<string, NodeView>> {
 	const { SummaryMember, SummaryNode } = summaryTables();
 	const barriers = new Barriers();
+	await barriers.prefetch();
 	const members = await Promise.all(hits.map((hit) => SummaryMember.get(hit.id as string)));
 	const leafIds = [...new Set(members.filter((member) => member?.eligible && member.leafId).map((m) => m.leafId))];
 	const leaves = new Map<string, any>(
@@ -168,12 +194,15 @@ export async function annotateHits(
 export async function expandNode(principal: Principal, id: string) {
 	const { SummaryMember, SummaryNode } = summaryTables();
 	const barriers = new Barriers();
+	const located = await SummaryNode.get(id);
+	if (!readable(located, principal) || (await barriers.probe(located.partition))) throw notFound();
+	// the text served is read after the barrier check
 	const node = await SummaryNode.get(id);
-	if (!(await servable(node, principal, barriers))) throw notFound();
+	if (!readable(node, principal) || node.partition !== located.partition) throw notFound();
 	if (node.level > 1) {
 		const children = await collect(SummaryNode.search({ conditions: [{ attribute: 'parentId', value: id }] }));
-		const sameTree = children.filter((child) => child.partition === node.partition);
-		return { node: view(node), children: (await filterServable(sameTree, principal, barriers)).sort(bySize).map(view) };
+		const sameTree = children.filter((child) => child.partition === node.partition && readable(child, principal));
+		return { node: view(node), children: sameTree.sort(bySize).map(view) };
 	}
 	const assigned = await collect(SummaryMember.search({ conditions: [{ attribute: 'leafId', value: id }] }));
 	const ids = assigned.filter((member) => member.eligible && member.partition === node.partition).map((m) => m.id);

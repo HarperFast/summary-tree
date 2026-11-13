@@ -4,7 +4,9 @@
 // fixtures' deterministic models, so it measures Harper and the plugin, not a model.
 //
 //   npm run install:fixtures
-//   node scripts/bench-serving.mjs --partitions 1000 [--requests 200]
+//   node scripts/bench-serving.mjs --partitions 1000 [--requests 200] [--without-plugin]
+//
+// --without-plugin runs agent-memory alone, for the write-path baseline (memory PUT latency).
 import { cp, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -16,7 +18,11 @@ import { createHarperContext, startHarper, teardownHarper } from '@harperfast/in
 const require = createRequire(import.meta.url);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { values: args } = parseArgs({
-	options: { partitions: { type: 'string', default: '1000' }, requests: { type: 'string', default: '200' } },
+	options: {
+		partitions: { type: 'string', default: '1000' },
+		requests: { type: 'string', default: '200' },
+		'without-plugin': { type: 'boolean', default: false },
+	},
 });
 const PASSWORD = 'Bench-serving-1!';
 
@@ -30,7 +36,8 @@ async function main() {
 	const dataRootDir = await mkdtemp(
 		join(process.env.HARPER_INTEGRATION_TEST_INSTALL_PARENT_DIR || tmpdir(), 'summary-tree-bench-'),
 	);
-	for (const app of ['memory-service', 'summary-app']) {
+	const withPlugin = !args['without-plugin'];
+	for (const app of withPlugin ? ['memory-service', 'summary-app'] : ['memory-service']) {
 		await cp(join(repoRoot, 'integrationTests', 'fixtures', app), join(dataRootDir, 'components', app), {
 			recursive: true,
 			dereference: true,
@@ -90,13 +97,31 @@ async function main() {
 			}),
 		);
 		const built = Date.now();
-		for (;;) {
+		for (; withPlugin;) {
 			const tree = await call(admin, 'GET', 'SummaryTree/');
 			if (tree.status === 200 && !tree.body.pending && tree.body.nodes.length >= partitions + 1) break;
 			await new Promise((r) => setTimeout(r, 1000));
 		}
 		const buildSeconds = Math.round((Date.now() - built) / 1000);
 		const alice = basic('alice', PASSWORD);
+		const writeTimes = [];
+		for (let i = 0; i < requests; i++) {
+			const content = `write latency probe ${i}`;
+			const start = performance.now();
+			const response = await call(admin, 'PUT', `Memory/${`bench-w${i}`.padEnd(16, '_')}`, {
+				title: content,
+				content,
+				scopes: [`team:p${i % Math.max(1, partitions)}`],
+			});
+			writeTimes.push(performance.now() - start);
+			if (response.status !== 201) throw new Error(`write ${i}: ${response.status}`);
+		}
+		writeTimes.sort((a, b) => a - b);
+		const writeMs = { p50: +percentile(writeTimes, 50).toFixed(2), p95: +percentile(writeTimes, 95).toFixed(2) };
+		if (!withPlugin) {
+			console.log(JSON.stringify({ partitions, plugin: false, memories: seeded, writeMs }, null, 2));
+			return;
+		}
 		const measure = async (auth, path) => {
 			for (let i = 0; i < 20; i++) await call(auth, 'GET', path);
 			const times = [];
@@ -115,6 +140,7 @@ async function main() {
 					partitions,
 					memories: seeded,
 					buildSeconds,
+					writeMs,
 					bootstrapMs: {
 						narrowReader: await measure(alice, 'Memory/bootstrap?budget=4000'),
 						superUser: await measure(admin, 'Memory/bootstrap?budget=4000'),

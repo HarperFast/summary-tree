@@ -1,4 +1,3 @@
-# Options go under the '@harperfast/summary-tree' key of the host application's config.yaml (README.md, Configuration).
 pluginModule: 'dist/index.js'
 
 graphqlSchema:

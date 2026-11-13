@@ -217,7 +217,6 @@ async function main() {
 		for (;;) {
 			const tree = await call('GET', 'SummaryTree/');
 			if (tree.status === 200 && !tree.body.pending && tree.body.nodes.length > 0) {
-				// the runner deletes a partition's changes in the same transaction that publishes its nodes
 				built = tree.body.nodes;
 				break;
 			}
@@ -266,7 +265,6 @@ async function main() {
 	}
 }
 
-/** Node count by level, by walking from the top nodes. */
 async function treeShape(tops, call) {
 	const levels = {};
 	let nodes = 0;

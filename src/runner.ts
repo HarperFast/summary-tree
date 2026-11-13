@@ -250,7 +250,7 @@ export class Runner {
 		await SummaryState.put({ ...state, leaseUntil: Date.now() + this.settings.leaseMs }, txn);
 	}
 
-	/** Without the runner lock: the assignments it guards only steer annotations, never what is served. */
+	/** Without the runner lock: assignments decide only which leaf a hit is annotated with and expand lists it under. */
 	async #checkLease(txn: object): Promise<void> {
 		const state = await summaryTables().SummaryState.get(RUNNER_ID, txn);
 		if (state?.leaseHolder !== this.holderId || !(state.leaseUntil > Date.now())) throw new LeaseLostError();
@@ -314,14 +314,17 @@ export class Runner {
 		const current = (await agentMemory.getMemories([...recorded.keys()])).filter(
 			(memory) => isEligible(memory, now) && partitionId(partitionLabels(memory.scopes)) === partition,
 		);
-		// A state the member row did not hold when read was committed since, together with its member row: re-read it.
-		// A memory whose member row still disagrees is left for its own pending change.
+		// A state newer than the member row read above committed together with its member row, so the row is re-read.
+		// Once the member row is at or past the state read here, any later change is still pending and will rebuild
+		// what this pass builds from it.
 		for (const memory of current) {
 			if (stateOf(memory) === recorded.get(memory.id as string)) continue;
 			const stored = await SummaryMember.get(memory.id);
-			if (stored?.eligible && stored.partition === partition) {
-				recorded.set(memory.id as string, `${stored.revision}:${stored.contentHash}`);
-			}
+			if (stored?.partition !== partition) continue;
+			const caughtUp =
+				stored.revision > (memory.revision as number) ||
+				(stored.revision === memory.revision && stored.contentHash === contentHash(memory));
+			if (caughtUp) recorded.set(memory.id as string, stateOf(memory));
 		}
 		const eligible = current.filter((memory) => stateOf(memory) === recorded.get(memory.id as string));
 		const textOf = new Map<string, string>(
@@ -438,6 +441,7 @@ export class Runner {
 			.map(([id, leafId]) => ({ id, leafId, expire: false }))
 			.concat(expired.map((row) => ({ id: row.id, leafId: null, expire: true })));
 		for (const update of updates) {
+			if (this.#stopped) throw new LeaseLostError();
 			await transaction(async (txn: object) => {
 				await this.#checkLease(txn);
 				await lockRow(SummaryMember, update.id, txn);
@@ -477,6 +481,7 @@ export class Runner {
 			else missing.push({ id, key });
 		}
 		for (let start = 0; start < missing.length; start += EMBED_BATCH) {
+			if (this.#stopped) throw new LeaseLostError();
 			const batch = missing.slice(start, start + EMBED_BATCH);
 			const embedded = await models.embed(
 				batch.map(({ id }) => textOf.get(id)!),

@@ -23,14 +23,29 @@ async function collect<T = any>(iterable: any): Promise<T[]> {
 	return rows;
 }
 
-/** Pending revoking changes, looked up per partition and memoized for one request. */
+const BARRIER_PREFETCH = 200;
+
+/**
+ * Pending revoking changes for one request: read in one query while there are at most BARRIER_PREFETCH of them,
+ * else looked up per partition and memoized.
+ */
 export class Barriers {
+	#known: Promise<Set<string> | undefined> | undefined;
 	#blocked = new Map<string, Promise<boolean>>();
 
-	isBlocked(partition: string): Promise<boolean> {
+	async isBlocked(partition: string): Promise<boolean> {
+		const { SummaryChange } = summaryTables();
+		this.#known ??= collect(
+			SummaryChange.search({
+				conditions: [{ attribute: 'revoke', value: true }],
+				select: ['partition'],
+				limit: BARRIER_PREFETCH + 1,
+			}),
+		).then((rows) => (rows.length > BARRIER_PREFETCH ? undefined : new Set(rows.map((row) => row.partition))));
+		const known = await this.#known;
+		if (known) return known.has(partition);
 		let blocked = this.#blocked.get(partition);
 		if (blocked === undefined) {
-			const { SummaryChange } = summaryTables();
 			blocked = collect(
 				SummaryChange.search({
 					conditions: [
@@ -132,7 +147,6 @@ export async function orientation(principal: Principal, budgetChars: number) {
 			if (items.length >= MAX_ORIENTATION_ITEMS) break;
 			const item = orientationItem(view(node));
 			const size = item.title.length + item.content.length;
-			// the barrier lookup only for a node that would be emitted
 			if (size > remaining || (await barriers.isBlocked(node.partition))) continue;
 			items.push(item);
 			remaining -= size;

@@ -103,13 +103,13 @@ own copy of agent-memory stops serving the memory: the change row replicates in 
 
 ## Cost
 
-| Event                                                                               | Model calls                                                                                   |
-| ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| Any memory write                                                                    | none in the write path                                                                        |
-| New memory                                                                          | none until its leaf is dirty; no embedding while `embeddingModel` matches agent-memory's      |
-| Leaf crosses its dirty mark                                                         | one summary for the leaf, plus one per ancestor level (at most 2 for a few thousand memories) |
-| Edit, withdraw, supersede, flag, expiry, review flag or move of a summarized memory | one summary for its leaf plus one per ancestor level                                          |
-| Re-cluster (size ×2 or ÷2)                                                          | one per new or changed topic; topics that kept their members keep their text                  |
+| Event                                                                               | Model calls                                                                                             |
+| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| Any memory write                                                                    | none; the sink adds one record lock, one read and two or three small writes to the memory's transaction |
+| New memory                                                                          | none until its leaf is dirty; no embedding while `embeddingModel` matches agent-memory's                |
+| Leaf crosses its dirty mark                                                         | one summary for the leaf, plus one per ancestor level (at most 2 for a few thousand memories)           |
+| Edit, withdraw, supersede, flag, expiry, review flag or move of a summarized memory | one summary for its leaf plus one per ancestor level                                                    |
+| Re-cluster (size ×2 or ÷2)                                                          | one per new or changed topic; topics that kept their members keep their text                            |
 
 `debounceMs` batches these: several changes to one leaf inside the window cost one call per affected node. The first
 build of a 2,000-memory partition makes about 150 calls (≈ n/15 leaves plus ≈ n/150 above them).
@@ -117,12 +117,15 @@ build of a 2,000-memory partition makes about 150 calls (≈ n/15 leaves plus �
 Serving cost grows with the number of summarized label sets, not with memories: bootstrap reads every top node and
 filters by label, then checks pending revocations only for the partitions it emits. Measured 2026-11-13
 (`scripts/bench-serving.mjs`, one Harper 5.4 worker, local): bootstrap p50 2.2 ms with 10 label sets and 8.5 ms with
-1,000 (3,040 memories; 11.4 ms for a super user who reads all 1,000); search with annotations 4.5 ms and 6.2 ms.
+1,000 (3,040 memories; 11.4 ms for a super user who reads all 1,000); search with annotations 4.5 ms and 6.2 ms. A memory write
+(`PUT /Memory/<id>`, 100 label sets) took 4.8 ms p50 without the plugin and 7.1 ms with it, using the fixtures' instant
+embedding model and with the runner rebuilding during the run; a real embedding call adds far more than either.
 
 ## Endpoints
 
 - `GET /SummaryTree/` → `{ nodes: [...top nodes the caller can read], pending }`. `pending` is true while a readable
-  partition has changes not yet applied.
+  partition has changes not yet applied; it reads at most 1,000 pending changes, so behind a larger backlog it can be
+  false early.
 - `GET /SummaryTree/<id>` → `{ node, children }` for a node with subtopics, `{ node, members: [{ id, title }] }` for a
   leaf. A node is `{ id, title, summary, level, memberCount, parentId }`.
 - MCP `expand_summary { id? }` → the same as the two routes above.

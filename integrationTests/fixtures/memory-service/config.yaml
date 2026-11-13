@@ -1,0 +1,8 @@
+# Runs agent-memory as its own app; summary-app hosts the summary-tree plugin beside it.
+rest: true
+
+jsResource:
+  files: 'resources.js'
+
+'@harperfast/agent-memory':
+  package: '@harperfast/agent-memory'

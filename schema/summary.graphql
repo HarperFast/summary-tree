@@ -1,0 +1,62 @@
+# In agent-memory's `memory` database, so a sink's writes commit or roll back with the memory and replicate with it.
+# Not exported: every read goes through the plugin's routes, which authorize with agent-memory's principal.
+
+# One row per memory the sink or the startup walk has seen: the assignment that lets a later change find the old
+# partition and leaf. `text` and `vector` are kept only while the memory is eligible.
+type SummaryMember @table(database: "memory") {
+	id: ID @primaryKey
+	partition: String @indexed
+	labels: [String]
+	revision: Int
+	status: String
+	flagged: Boolean
+	eligible: Boolean
+	leafId: String @indexed
+	title: String
+	text: String
+	vector: [Float]
+	validUntil: Date @indexed
+	createdAt: Date
+}
+
+type SummaryNode @table(database: "memory") {
+	id: ID @primaryKey
+	partition: String @indexed
+	labels: [String]
+	level: Int
+	parentId: String @indexed
+	top: Boolean @indexed
+	title: String
+	summary: String
+	memberCount: Int
+	centroid: [Float]
+	# leaf: memberId@revision it was summarized from; interior: child ids
+	builtFrom: [String]
+	# every memory whose text this node's summary was derived from, directly or through children
+	sourceIds: [String] @indexed
+	summarizedAt: Date
+}
+
+# Append-only work queue. A row with revoke: true hides its whole partition until a pass absorbs it.
+type SummaryChange @table(database: "memory") {
+	id: ID @primaryKey
+	partition: String @indexed
+	labels: [String]
+	memoryId: String
+	revision: Int
+	revoke: Boolean @indexed
+	createdAt: Date
+}
+
+type SummaryPartition @table(database: "memory") {
+	id: ID @primaryKey
+	labels: [String]
+	clusteredSize: Int
+	clusteredAt: Date
+}
+
+type SummaryState @table(database: "memory") {
+	id: ID @primaryKey
+	leaseHolder: String
+	leaseUntil: Float
+}

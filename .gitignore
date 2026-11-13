@@ -1,5 +1,7 @@
 node_modules/
+dist/
 *.log
 .DS_Store
-/data/
-/rootPath/
+.env*
+integrationTests/fixtures/*/node_modules/
+integrationTests/fixtures/*/package-lock.json

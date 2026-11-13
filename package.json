@@ -1,24 +1,65 @@
 {
-  "name": "summary-tree",
-  "version": "0.1.0",
-  "description": "RAPTOR-style hierarchical summary-tree retrieval as a Harper application (reference implementation for HarperFast/harper#1244)",
-  "type": "module",
-  "license": "Apache-2.0",
-  "scripts": {
-    "test": "node --test 'test/*.test.js'"
-  },
-  "keywords": [
-    "harper",
-    "harperdb",
-    "rag",
-    "retrieval",
-    "raptor",
-    "hnsw",
-    "vector-search",
-    "embeddings"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/HarperFast/summary-tree.git"
-  }
+	"name": "@harperfast/summary-tree",
+	"version": "0.2.0",
+	"description": "Permission-safe topic summary trees over @harperfast/agent-memory: orientation at bootstrap and topic summaries beside search hits — a Harper plugin",
+	"license": "Apache-2.0",
+	"author": {
+		"name": "HarperDB, Inc.",
+		"email": "opensource@harperdb.io",
+		"url": "https://harper.fast/"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/HarperFast/summary-tree.git"
+	},
+	"type": "module",
+	"main": "dist/index.js",
+	"exports": {
+		".": "./dist/index.js",
+		"./config": "./config.yaml"
+	},
+	"files": [
+		"dist/",
+		"!dist/**/*.map",
+		"schema/",
+		"config.yaml",
+		"README.md",
+		"DESIGN.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"build": "tsc",
+		"prepack": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && tsc --sourceMap false",
+		"test": "npm run build && node --import ./test/helpers/harper-mock.mjs --test \"test/**/*.test.js\"",
+		"install:fixtures": "node scripts/install-fixtures.js",
+		"test:integration": "npm run build && npm run install:fixtures && harper-integration-test-run \"integrationTests/**/*.test.ts\"",
+		"eval:orientation": "node scripts/eval-orientation.mjs",
+		"format:check": "prettier --check .",
+		"format:write": "prettier --write ."
+	},
+	"keywords": [
+		"harper",
+		"agent-memory",
+		"summarization",
+		"raptor",
+		"orientation"
+	],
+	"peerDependencies": {
+		"@harperfast/agent-memory": ">=0.1.5-0 <0.2.0",
+		"harper": "^5.3.1"
+	},
+	"devDependencies": {
+		"@harperfast/agent-memory": "file:vendor/harperfast-agent-memory-0.1.5-pre.126b62c.tgz",
+		"@harperfast/integration-testing": "1.0.5",
+		"@types/node": "^22.0.0",
+		"harper": "^5.4.0",
+		"prettier": "^3.6.2",
+		"typescript": "^5.8.0"
+	},
+	"engines": {
+		"node": ">=22"
+	},
+	"publishConfig": {
+		"access": "public"
+	}
 }

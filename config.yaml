@@ -1,5 +1,6 @@
+# Plugin entry point and defaults. Every option can be overridden under the plugin's key in the host application's
+# config.yaml; see README.md, Configuration.
+pluginModule: 'dist/index.js'
+
 graphqlSchema:
-  files: '*.graphql'
-jsResource:
-  files: resources.js
-rest: true
+  files: 'schema/*.graphql'

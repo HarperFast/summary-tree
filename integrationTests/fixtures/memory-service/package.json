@@ -1,0 +1,6 @@
+{
+	"name": "summary-tree-fixture-memory-service",
+	"private": true,
+	"type": "module",
+	"description": "Integration-test app running @harperfast/agent-memory on its own. scripts/install-fixtures.js installs the vendored package."
+}

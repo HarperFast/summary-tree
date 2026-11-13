@@ -104,10 +104,9 @@ export const lockCalls = [];
 
 export const databases = {
 	memory: Object.fromEntries(
-		['SummaryMember', 'SummaryNode', 'SummaryChange', 'SummaryPartition', 'SummaryState'].map((name) => [
-			name,
-			new Table(name),
-		]),
+		['SummaryMember', 'SummaryAssignment', 'SummaryNode', 'SummaryChange', 'SummaryPartition', 'SummaryState'].map(
+			(name) => [name, new Table(name)],
+		),
 	),
 };
 

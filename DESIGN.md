@@ -12,11 +12,12 @@ cost and endpoints are in [README.md](README.md).
 - **The sink only enqueues** (`recordMemory`, `src/store.ts`): one member-row read and write plus one or two change
   rows, all through the sink's `context` in the `memory` database, so they commit or roll back with the memory. No
   model call, no node read.
-- **Member rows are written under their node-scoped record lock** (`lockRow`) by the sink, the startup walk and the
-  runner's leaf assignment. The runner writes only `leafId` and the expiry fields, as a patch, so it never writes back
-  a stale copy of lifecycle fields another node's sink changed. The walk skips a scanned row recorded at a later revision, or at the same revision in
-  the same state (two nodes can write one revision), so a walk that read revision N cannot overwrite a sink's N+1. The sink takes this lock after agent-memory's `Memory` locks;
-  no member-row writer holds a `Memory` lock, so there is no cycle.
+- **Every table has one writer role.** `SummaryMember` is written only by the sink and the startup walk, under the
+  member row's node-scoped record lock (`lockRow`), which the sink takes after agent-memory's `Memory` locks; neither
+  writer holds a `Memory` lock, so there is no cycle. `SummaryAssignment` (leaf per memory), `SummaryNode`,
+  `SummaryPartition` and the expiry bookkeeping in `SummaryState` are written only by the leaseholding runner. The walk
+  skips a scanned row recorded at a later revision, or at the same revision in the same state; at an equal revision
+  in a different state it records the current row from `getMemories`, since two nodes can write one revision.
 - **A member row keeps its `partition`, `status` and `flagged` after the memory becomes ineligible**: a later change
   needs them to know which partition to revoke.
 - **The runner summarizes a memory only in a state at or behind its member row** (revision and `contentHash`,
@@ -52,7 +53,7 @@ cost and endpoints are in [README.md](README.md).
 ## Rebuilds
 
 - **A partition's changes are read before its members, and deleted last**, in their own lease-fenced transaction
-  after the nodes they require are published and the leaf assignments written (`Runner.rebuildPartition`). A change
+  after the nodes they require are published and the assignments written (`Runner.rebuildPartition`). A change
   committed after the member read is not deleted, so it keeps a revoked partition hidden until the next pass rebuilds
   from member state that includes it. A failure or crash at any step leaves the changes, so the partition stays
   hidden if they revoke, and the next pass repeats the work.
@@ -71,11 +72,13 @@ cost and endpoints are in [README.md](README.md).
   lock lease expired. Without cluster locks, two nodes can both hold the lease within replication lag, and a stale
   publish replicates over a newer one; the `runner: false` option confines rebuilds to one node there. Record locks
   need RocksDB, as agent-memory's own lifecycle writes do.
-- **No plugin transaction holds two member locks.** The startup walk and leaf assignment take one per transaction.
-  agent-memory's multi-memory operations can make the sink take several, in their order, so a second multi-lock
-  holder could deadlock with it.
+- **No plugin transaction holds two member locks.** The startup walk takes one per transaction. agent-memory's
+  multi-memory operations can make the sink take several, in their order, so a second multi-lock holder could
+  deadlock with it.
 - **Scheduling is event-driven**: a `SummaryChange` subscription debounces a tick; a tick with no changes and no
-  expired members does nothing; the only idle timer is the next `validUntil` (`#armExpiry`). Failures back off
+  expired members does nothing; the only idle timer is the next `validUntil` (`#armExpiry`). Expiry needs no member
+  write: the runner keeps the time up to which it has handled expiries (`SummaryState` `expiry`), and `getMemories`
+  state excludes an expired memory from every rebuild. Failures back off
   exponentially while work remains.
 - **Clustering yields to the event loop** (`kmeans`, `src/kmeans.ts`) so a large partition does not stall the worker
   that also serves requests.

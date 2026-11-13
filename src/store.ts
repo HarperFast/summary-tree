@@ -5,6 +5,7 @@ import { contentHash, isEligible, partitionId, partitionLabels, revokesFrom } fr
 
 export interface Tables {
 	SummaryMember: any;
+	SummaryAssignment: any;
 	SummaryNode: any;
 	SummaryChange: any;
 	SummaryPartition: any;
@@ -71,7 +72,6 @@ export async function recordMemory(
 			flagged,
 			eligible,
 			contentHash: hash,
-			leafId: eligible && previous?.partition === partition ? (previous.leafId ?? null) : null,
 			validUntil: eligible && memory.validUntil ? new Date(memory.validUntil as string) : null,
 		},
 		context,

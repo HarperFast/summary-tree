@@ -51,15 +51,13 @@ test("the sink's enqueue rolls back with an aborted memory write", async () => {
 	assert.deepEqual(rows('SummaryChange'), []);
 });
 
-test('withdrawing a member revokes its old partition through the assignment row', async () => {
+test('withdrawing a member revokes its partition through the member row', async () => {
 	await transaction((txn) => recordMemory(memory(), txn, opts));
-	await databases.memory.SummaryMember.put({ ...rows('SummaryMember')[0], leafId: 'leaf-1' });
 	resetChanges();
 	await transaction((txn) => recordMemory(memory({ status: 'withdrawn', revision: 2 }), txn, opts));
 	assert.deepEqual(changes(), [{ partition: ACME, revoke: true, memoryId: 'mem-aaaaaaaaaaaaaaaa' }]);
 	const [member] = rows('SummaryMember');
 	assert.equal(member.eligible, false);
-	assert.equal(member.leafId, null);
 });
 
 test('superseding a member dirties its partition without hiding it', async () => {

@@ -4,13 +4,14 @@ import { threadId } from 'node:worker_threads';
 import { models, transaction } from 'harper';
 import * as agentMemory from '@harperfast/agent-memory';
 import { normalize, type Vector } from './kmeans.ts';
-import { contentHash, isEligible, isExpired, memberText, partitionId, partitionLabels } from './partition.ts';
+import { contentHash, isEligible, memberText, partitionId, partitionLabels } from './partition.ts';
 import { memberRef, planPartition, type ExistingNode, type PlanMember } from './plan.ts';
 import { promptInputChars, type Settings } from './settings.ts';
-import { lockRow, recordMemory, summaryTables } from './store.ts';
+import { recordMemory, summaryTables } from './store.ts';
 import { summarize } from './summarize.ts';
 
 const RUNNER_ID = 'runner';
+const EXPIRY_ID = 'expiry';
 const EMBED_BATCH = 32;
 const VECTOR_CACHE_LIMIT = 50_000;
 const MAX_BACKOFF_MS = 30 * 60_000;
@@ -141,11 +142,16 @@ export class Runner {
 		return (await this.#expiredMembers(1)).length > 0;
 	}
 
-	#expiredMembers(limit?: number): Promise<any[]> {
-		const { SummaryMember } = summaryTables();
+	/** Members whose `validUntil` passed since the last pass that rebuilt their partitions (runner-owned bookkeeping). */
+	async #expiredMembers(limit?: number): Promise<any[]> {
+		const { SummaryMember, SummaryState } = summaryTables();
+		const checked = (await SummaryState.get(EXPIRY_ID))?.checkedUntil;
 		return collect(
 			SummaryMember.search({
-				conditions: [{ attribute: 'validUntil', comparator: 'less_than_equal', value: new Date() }],
+				conditions: [
+					{ attribute: 'validUntil', comparator: 'less_than_equal', value: new Date() },
+					...(checked ? [{ attribute: 'validUntil', comparator: 'greater_than', value: new Date(checked) }] : []),
+				],
 				select: ['id', 'partition', 'labels', 'eligible'],
 				...(limit ? { limit } : {}),
 			}),
@@ -262,6 +268,7 @@ export class Runner {
 
 	async #pass(): Promise<number> {
 		const { SummaryChange } = summaryTables();
+		const passStart = new Date();
 		const partitions = new Map<string, readonly string[]>();
 		for (const row of await collect<any>(SummaryChange.search({ select: ['partition', 'labels'] }))) {
 			partitions.set(row.partition, row.labels ?? []);
@@ -281,6 +288,12 @@ export class Runner {
 				this.#log.error?.(`@harperfast/summary-tree: rebuilding partition ${partition} failed`, error);
 			}
 		}
+		if (!failures && !this.#stopped) {
+			await transaction(async (txn: object) => {
+				await this.#assertLease(txn);
+				await summaryTables().SummaryState.put({ id: EXPIRY_ID, checkedUntil: passStart }, txn);
+			});
+		}
 		return failures;
 	}
 
@@ -290,7 +303,7 @@ export class Runner {
 	 * last, in their own lease-fenced transaction, after every node they require is published.
 	 */
 	async rebuildPartition(partition: string, labels: readonly string[]): Promise<void> {
-		const { SummaryChange, SummaryMember, SummaryNode, SummaryPartition } = summaryTables();
+		const { SummaryAssignment, SummaryChange, SummaryMember, SummaryNode, SummaryPartition } = summaryTables();
 		const settings = this.settings;
 		const changes = await collect<any>(
 			SummaryChange.search({ conditions: [{ attribute: 'partition', value: partition }] }),
@@ -321,12 +334,14 @@ export class Runner {
 		const rows = (
 			await collect<any>(SummaryMember.search({ conditions: [{ attribute: 'partition', value: partition }] }))
 		).map((row) => ({ ...row }));
-		const expired = rows.filter((row) => row.eligible && isExpired(row.validUntil, now));
 		const recorded = new Map<string, string>(
 			rows.filter((row) => row.eligible).map((row) => [row.id, `${row.revision}:${row.contentHash}`]),
 		);
 		const stateOf = (memory: Record<string, unknown>) => `${memory.revision}:${contentHash(memory)}`;
-		const storedLeaf = new Map<string, string | null>(rows.map((row) => [row.id, row.leafId ?? null]));
+		const assigned = await collect<any>(
+			SummaryAssignment.search({ conditions: [{ attribute: 'partition', value: partition }] }),
+		);
+		const storedLeaf = new Map<string, string | null>(assigned.map((row) => [row.id, row.leafId ?? null]));
 		const current = (await agentMemory.getMemories([...recorded.keys()])).filter(
 			(memory) => isEligible(memory, now) && partitionId(partitionLabels(memory.scopes)) === partition,
 		);
@@ -456,28 +471,19 @@ export class Runner {
 			}
 		});
 
-		// One member lock per transaction, like every writer but the sink. The changes are deleted after these, so a crash
-		// in between leaves them for the next pass.
-		const updates = [...plan.leafOf.entries()]
-			.filter(([id, leafId]) => storedLeaf.get(id) !== leafId)
-			.map(([id, leafId]) => ({ id, leafId, expire: false }))
-			.concat(expired.map((row) => ({ id: row.id, leafId: null, expire: true })));
-		for (const update of updates) {
-			if (this.#stopped) throw new LeaseLostError();
-			await transaction(async (txn: object) => {
-				await this.#assertLease(txn);
-				await lockRow(SummaryMember, update.id, txn);
-				const stored = await SummaryMember.get(update.id, txn);
-				if (!stored || stored.partition !== partition) return;
-				const expire = update.expire && stored.eligible && isExpired(stored.validUntil, Date.now());
-				// a patch, so a lifecycle write from another node's sink is not overwritten with this node's copy
-				await SummaryMember.patch(
-					update.id,
-					expire ? { eligible: false, leafId: null, validUntil: null } : { leafId: update.leafId },
-					txn,
-				);
-			});
-		}
+		// Assignments belong to the runner alone. The changes are deleted after them, so a crash in between leaves the
+		// changes for the next pass.
+		if (this.#stopped) throw new LeaseLostError();
+		await transaction(async (txn: object) => {
+			await this.#assertLease(txn);
+			for (const [id, leafId] of plan.leafOf) {
+				if (leafId !== null && storedLeaf.get(id) !== leafId)
+					await SummaryAssignment.put({ id, partition, leafId }, txn);
+			}
+			for (const id of storedLeaf.keys()) {
+				if (!plan.leafOf.get(id)) await SummaryAssignment.delete(id, txn);
+			}
+		});
 
 		await transaction(async (txn: object) => {
 			await this.#assertLease(txn);

@@ -64,7 +64,10 @@ test('the startup walk records memories its sink missed, then a pass builds and 
 	assert.equal(node.memberCount, 5);
 	assert.equal(node.top, true);
 	assert.deepEqual([...node.sourceIds].sort(), [1, 2, 3, 4, 5].map((n) => memory(n).id).sort());
-	assert.ok(rows('SummaryMember').every((member) => member.leafId === node.id));
+	assert.deepEqual(
+		rows('SummaryAssignment').map((row) => row.leafId),
+		[node.id, node.id, node.id, node.id, node.id],
+	);
 	assert.equal(modelState.generateCalls, 1);
 	assert.equal(rows('SummaryState')[0].leaseUntil, 0, 'the lease is released after the pass');
 });
@@ -136,8 +139,11 @@ test('an expired member leaves its summary without any change event', async () =
 	await startWith([1, 2, 3, 4].map((n) => memory(n)).concat(memory(5, { validUntil: soon })));
 	assert.equal(rows('SummaryNode')[0].memberCount, 5);
 	await until('expiry to rebuild the node', async () => rows('SummaryNode')[0]?.memberCount === 4, 5_000);
-	const expired = rows('SummaryMember').find((member) => member.id === memory(5).id);
-	assert.equal(expired.eligible, false);
+	assert.ok(!rows('SummaryAssignment').some((row) => row.id === memory(5).id), 'its assignment is removed');
+	assert.ok(
+		rows('SummaryState').some((row) => row.id === 'expiry'),
+		'the runner keeps its own expiry bookkeeping',
+	);
 });
 
 test('a worker with runner: false serves but never rebuilds', async () => {
@@ -169,7 +175,6 @@ test('a memory moved to another label set on another node revokes the partition 
 		partition: BETA,
 		labels: ['customer:beta'],
 		revision: 2,
-		leafId: null,
 	});
 	await databases.memory.SummaryChange.put({
 		id: 'replicated',

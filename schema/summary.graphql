@@ -12,8 +12,14 @@ type SummaryMember @table(database: "memory") {
 	flagged: Boolean
 	eligible: Boolean
 	contentHash: String
-	leafId: String @indexed
 	validUntil: Date @indexed
+}
+
+# Written only by the runner: which leaf each eligible member was last assigned to.
+type SummaryAssignment @table(database: "memory") {
+	id: ID @primaryKey
+	partition: String @indexed
+	leafId: String @indexed
 }
 
 type SummaryNode @table(database: "memory") {
@@ -58,4 +64,5 @@ type SummaryState @table(database: "memory") {
 	id: ID @primaryKey
 	leaseHolder: String
 	leaseUntil: Float
+	checkedUntil: Date
 }

@@ -5,7 +5,7 @@ import { memoryStore } from '@harperfast/agent-memory';
 import { annotateHits, expandNode, orientation, readableTopNodes } from '../dist/serve.js';
 import { partitionId, partitionLabels } from '../dist/partition.js';
 
-const { SummaryMember, SummaryNode, SummaryChange } = databases.memory;
+const { SummaryAssignment, SummaryMember, SummaryNode, SummaryChange } = databases.memory;
 
 const acmeReader = { id: 'bob', superUser: false, read: ['user:bob', 'global', 'customer:acme'] };
 const globalReader = { id: 'alice', superUser: false, read: ['user:alice', 'global'] };
@@ -41,14 +41,9 @@ beforeEach(async () => {
 		['m-beta', ['customer:beta'], 'beta-1'],
 		['m-global', ['global'], 'global-1a'],
 	]) {
-		await SummaryMember.put({
-			id,
-			partition: partitionId(partitionLabels(scopes)),
-			labels: scopes,
-			eligible: true,
-			leafId,
-			revision: 1,
-		});
+		const partition = partitionId(partitionLabels(scopes));
+		await SummaryMember.put({ id, partition, labels: scopes, eligible: true, revision: 1 });
+		await SummaryAssignment.put({ id, partition, leafId });
 		memoryStore.set(id, { id, title: `${id} title`, content: 'c', scopes, status: 'active', revision: 1 });
 	}
 });

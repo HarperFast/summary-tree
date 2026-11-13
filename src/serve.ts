@@ -142,6 +142,8 @@ export function orientationItem(node: NodeView): { title: string; content: strin
 }
 
 const MAX_ORIENTATION_ITEMS = 64;
+// candidates probed per request, served or not, so a burst of blocked partitions bounds the work
+const MAX_ORIENTATION_ATTEMPTS = 128;
 
 /**
  * The orientation section: the top levels of every readable tree, breadth first and largest first within a level,
@@ -157,12 +159,14 @@ async function orientationIn(barriers: Barriers, principal: Principal, budgetCha
 	let level = (await metaSearch([{ attribute: 'top', value: true }], barriers.txn))
 		.filter(readableMeta(principal))
 		.sort(bySize);
-	while (level.length && items.length < MAX_ORIENTATION_ITEMS) {
+	let attempts = 0;
+	while (level.length && items.length < MAX_ORIENTATION_ITEMS && attempts < MAX_ORIENTATION_ATTEMPTS) {
 		const next: any[] = [];
 		for (const meta of level) {
-			if (items.length >= MAX_ORIENTATION_ITEMS) break;
+			if (items.length >= MAX_ORIENTATION_ITEMS || attempts >= MAX_ORIENTATION_ATTEMPTS) break;
 			// the size check needs no text, so a node that cannot fit costs no probe and no read
 			if ((meta.textChars ?? 0) + itemSuffix(meta).length > remaining) continue;
+			attempts++;
 			const node = await barriers.read(meta, principal);
 			if (!node) continue;
 			const item = orientationItem(view(node));
@@ -192,9 +196,15 @@ async function annotateIn(
 	principal: Principal,
 	hits: readonly Readonly<Record<string, unknown>>[],
 ): Promise<Map<string, NodeView>> {
-	const { SummaryMember } = summaryTables();
+	const { SummaryAssignment, SummaryMember } = summaryTables();
 	const members = await Promise.all(hits.map((hit) => SummaryMember.get(hit.id as string, barriers.txn)));
-	const leafIds = [...new Set(members.filter((member) => member?.eligible && member.leafId).map((m) => m.leafId))];
+	const assignments = await Promise.all(hits.map((hit) => SummaryAssignment.get(hit.id as string, barriers.txn)));
+	const leafOf = (index: number) => {
+		const member = members[index];
+		const assignment = assignments[index];
+		return member?.eligible && assignment?.partition === member.partition ? assignment.leafId : undefined;
+	};
+	const leafIds = [...new Set(hits.map((_, index) => leafOf(index)).filter((id) => id))];
 	const leaves = new Map<string, any>();
 	for (const id of leafIds) {
 		const [meta] = await metaSearch([{ attribute: 'id', value: id }], barriers.txn);
@@ -202,7 +212,8 @@ async function annotateIn(
 	}
 	const annotations = new Map<string, NodeView>();
 	for (const [index, member] of members.entries()) {
-		const leaf = member?.eligible && member.leafId ? leaves.get(member.leafId) : undefined;
+		const leafId = leafOf(index);
+		const leaf = leafId ? leaves.get(leafId) : undefined;
 		if (leaf && leaf.partition === member.partition) annotations.set(hits[index].id as string, view(leaf));
 	}
 	return annotations;
@@ -213,7 +224,7 @@ export function expandNode(principal: Principal, id: string) {
 }
 
 async function expandIn(barriers: Barriers, principal: Principal, id: string) {
-	const { SummaryMember } = summaryTables();
+	const { SummaryAssignment } = summaryTables();
 	const [meta] = await metaSearch([{ attribute: 'id', value: id }], barriers.txn);
 	const node = await barriers.read(meta, principal);
 	if (!node) throw notFound();
@@ -224,9 +235,9 @@ async function expandIn(barriers: Barriers, principal: Principal, id: string) {
 		return { node: view(node), children: (await barriers.readAll(children, principal)).sort(bySize).map(view) };
 	}
 	const assigned = await collect(
-		SummaryMember.search({ conditions: [{ attribute: 'leafId', value: id }] }, barriers.txn),
+		SummaryAssignment.search({ conditions: [{ attribute: 'leafId', value: id }] }, barriers.txn),
 	);
-	const ids = assigned.filter((member) => member.eligible && member.partition === node.partition).map((m) => m.id);
+	const ids = assigned.filter((row) => row.partition === node.partition).map((row) => row.id);
 	const now = Date.now();
 	const members = (await agentMemory.getMemories(ids)).filter(
 		(memory) => isEligible(memory, now) && partitionId(partitionLabels(memory.scopes)) === node.partition,

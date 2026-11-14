@@ -234,6 +234,11 @@ suite('summary-tree over agent-memory running as a separate app', (ctx: ContextW
 			[...counts].sort((a: number, b: number) => b - a),
 		);
 		ok(entries.length > tops.length, 'subtopics fill the rest of the budget');
+		for (const entry of entries) {
+			const [gist, reference] = entry.content.split('\n');
+			ok(gist.length <= 200 && /[.!?…]$/.test(gist), gist);
+			ok(/^\(\d+ memories; summary node \S+\)$/.test(reference), entry.content);
+		}
 	});
 
 	test('orientation takes half of a small budget and leaves the rest for recent memories', async () => {

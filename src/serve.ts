@@ -151,7 +151,6 @@ function itemSuffix(node: { memberCount: number; id: string }): string {
 const GIST_MAX_CHARS = 200;
 const GIST_MIN_CHARS = 60;
 
-/** Title, the summary's gist in at most `maxChars`, and where to read the rest. */
 export function orientationItem(node: NodeView, maxChars = GIST_MAX_CHARS): { title: string; content: string } {
 	const text = gist(node.summary, Math.min(GIST_MAX_CHARS, maxChars), GIST_MIN_CHARS);
 	return { title: node.title, content: `${text}${itemSuffix(node)}` };

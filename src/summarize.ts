@@ -44,24 +44,26 @@ const ELLIPSIS = '…';
 // a character that is not lowercase, so "e.g. the" and "3.5" do not end one.
 const SENTENCE_END = /[.!?]["'\u201d\u2019)\]]*(?=$|\s+[^\s\p{Ll}])/gu;
 
-/** Offsets just past each sentence end in `text`. */
-export function sentenceEnds(text: string): number[] {
+function sentenceEnds(text: string): number[] {
 	return [...text.matchAll(SENTENCE_END)].map((match) => match.index + match[0].length);
 }
 
 /** At most `maxChars` (ellipsis included), cut after the last whole word at or past `minChars`, else mid-word. */
 function cutAtWord(text: string, maxChars: number, minChars: number): string {
-	const head = text.slice(0, maxChars - ELLIPSIS.length);
+	let headChars = maxChars - ELLIPSIS.length;
+	if (/[\uD800-\uDBFF]/.test(text[headChars - 1] ?? '')) headChars--;
+	const head = text.slice(0, headChars);
 	const space = head.search(/\s\S*$/);
 	return `${(space >= minChars ? head.slice(0, space) : head).trimEnd()}${ELLIPSIS}`;
 }
 
 /**
  * The first sentence that ends at or past `minChars`, when it fits in `maxChars`; otherwise a cut at a word boundary
- * marked with an ellipsis. At least `min(text.length, minChars)` and at most `maxChars` characters.
+ * marked with an ellipsis, of at most `maxChars` characters.
  */
 export function gist(text: string, maxChars: number, minChars: number): string {
-	const end = sentenceEnds(text).find((offset) => offset >= minChars);
+	// a sentence end at maxChars is recognized from the few characters after it, so the rest is never scanned
+	const end = sentenceEnds(text.slice(0, maxChars + 16)).find((offset) => offset >= minChars);
 	if (end !== undefined && end <= maxChars) return text.slice(0, end);
 	if (text.length <= maxChars) return text;
 	return cutAtWord(text, maxChars, minChars);
@@ -129,7 +131,9 @@ export function parseResponse(text: string, truncated = false): { title: string;
 			.join(' ')
 			.replace(/[.,;:]+$/, '');
 	}
-	if (truncated || summary.length > MAX_SUMMARY_CHARS) summary = trimToSentence(summary, MAX_SUMMARY_CHARS);
+	if (summary && (truncated || summary.length > MAX_SUMMARY_CHARS)) {
+		summary = trimToSentence(summary, MAX_SUMMARY_CHARS);
+	}
 	return { title: title.slice(0, MAX_TITLE_CHARS), summary };
 }
 

@@ -123,3 +123,19 @@ test('summarize: a length-stopped generation is stored without its cut-off sente
 	const result = await summarize(models, ['x'], 1, { model: 'm', maxTokens: 400, maxInputChars: 1000 });
 	assert.equal(result.summary, 'First point is made here in full.');
 });
+
+test('an empty length-stopped generation is still rejected, and cuts never split a surrogate pair', async () => {
+	await assert.rejects(
+		summarize({ generate: async () => ({ content: '', finishReason: 'length' }) }, ['x'], 1, {
+			model: 'm',
+			maxTokens: 400,
+			maxInputChars: 1000,
+		}),
+		/empty summary/,
+	);
+	const { summary } = parseResponse(`TITLE: Long\n\n${'a'.repeat(1998)}\u{1F600} more`);
+	assert.ok(summary.length <= 2000 && summary.endsWith('…'));
+	assert.ok(!/[\uD800-\uDBFF]…$/.test(summary), 'no lone high surrogate before the ellipsis');
+	const cut = gist(`Facts are valid. ${'\u{1F600}'.repeat(120)}`, 61, 60);
+	assert.ok(cut.length <= 61 && !/[\uD800-\uDBFF]…$/.test(cut));
+});

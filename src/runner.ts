@@ -106,6 +106,7 @@ export class Runner {
 			}
 			if (this.#stopped) return;
 			if (this.settings.runner) await this.#queueLoneTops();
+			if (this.#stopped) return;
 			this.#ready = true;
 			this.schedule(0);
 		} catch (error) {
@@ -133,6 +134,7 @@ export class Runner {
 			tops.set(node.partition, nodes);
 		}
 		for (const [partition, [node, ...others]] of tops) {
+			if (this.#stopped) return;
 			if (others.length || node.level <= 1) continue;
 			await transaction((txn: object) =>
 				SummaryChange.put(

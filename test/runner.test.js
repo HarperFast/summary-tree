@@ -229,3 +229,36 @@ test('on startup a partition whose only top node sits above the leaves is re-pla
 	assert.equal(promoted.parentId, null);
 	assert.equal(modelState.generateCalls, calls, 'no model call');
 });
+
+test('a runner stopped while it looks for lone top nodes stays stopped and queues nothing', async () => {
+	await startWith([1, 2, 3, 4, 5].map((n) => memory(n)));
+	const leaf = rows('SummaryNode')[0];
+	runner.stop();
+	await databases.memory.SummaryNode.put({ ...leaf, id: 'legacy-root', level: 2, parentId: null, top: true });
+	await databases.memory.SummaryNode.put({ ...leaf, parentId: 'legacy-root', top: false });
+
+	const { SummaryNode } = databases.memory;
+	const search = SummaryNode.search;
+	let release;
+	let entered = false;
+	const gate = new Promise((resolve) => (release = resolve));
+	SummaryNode.search = async function (query, ...rest) {
+		if (query?.conditions?.some((condition) => condition.attribute === 'top')) {
+			entered = true;
+			await gate;
+		}
+		return search.call(this, query, ...rest);
+	};
+	try {
+		runner = new Runner(settings, quiet);
+		runner.start();
+		await until('the lone-top search', async () => entered);
+		runner.stop();
+		release();
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.equal(runner.ready, false);
+		assert.ok(!rows('SummaryChange').some((change) => change.id.startsWith('reshape:')));
+	} finally {
+		SummaryNode.search = search;
+	}
+});

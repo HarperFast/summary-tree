@@ -13,4 +13,6 @@
 - **Complete sentences.** The summary prompt states its length in words and sentences sized under
   `maxSummaryTokens`, and a summary cut off at the token cap or the 2,000-character cap is stored up to its last
   complete sentence. Summaries already stored keep their text until they are next rebuilt.
+- When agent-memory passes the client's per-item framing cost (`itemOverheadChars`, newer than 0.1.5), orientation
+  counts it for every item after the first.
 - Settings reject `NaN` for numeric options.

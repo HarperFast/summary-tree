@@ -17,6 +17,12 @@ const REQUIRED_EXPORTS = [
 ] as const;
 
 const ORIENTATION_SECTION = 'orientation';
+
+/** The client's framing cost per bootstrap item, which agent-memory 0.1.5 does not report. */
+function itemOverhead(input: object): number {
+	const value = (input as { itemOverheadChars?: unknown }).itemOverheadChars;
+	return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+}
 const SEARCH_ANNOTATION = 'summaryTree';
 
 export async function handleApplication(scope: Scope): Promise<void> {
@@ -41,8 +47,10 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		agentMemory.registerMemorySink({ write: record, withdraw: record }),
 		agentMemory.registerBootstrapSection({
 			name: ORIENTATION_SECTION,
-			render: ({ principal, budgetChars }) =>
-				runner.ready ? orientation(principal, budgetChars, runner.settings.orientationShare) : null,
+			render: (input) =>
+				runner.ready
+					? orientation(input.principal, input.budgetChars, runner.settings.orientationShare, itemOverhead(input))
+					: null,
 		}),
 		agentMemory.registerSearchAnnotator({
 			name: SEARCH_ANNOTATION,

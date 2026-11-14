@@ -141,7 +141,8 @@ embedding model and with the runner rebuilding during the run; a real embedding 
 - Search hits gain `summaryTree: { id, title, summary, level, memberCount, parentId }`.
 - Bootstrap's `orientation` items are `{ title, content: "<gist>\n(<n> memories; summary node <id>)" }`. The gist is the
   summary's first sentence, or at most 200 characters cut at a word and ending in `…`; the full summary is one
-  `GET /SummaryTree/<id>` or `expand_summary` away.
+  `GET /SummaryTree/<id>` or `expand_summary` away. When agent-memory reports its per-item framing cost
+  (`itemOverheadChars`, newer than 0.1.5), orientation counts it for every item after the first.
 
 ## Evaluation
 

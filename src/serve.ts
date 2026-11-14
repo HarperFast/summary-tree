@@ -173,14 +173,15 @@ const MAX_ORIENTATION_ATTEMPTS = 128;
  * The orientation section: the top levels of every readable tree, breadth first and largest first within a level,
  * packed into `share` of the budget agent-memory left, so the sections it packs afterwards (recent, relevant) keep
  * the rest. A node that does not fit is skipped along with its subtree.
+ * @param itemOverheadChars the client's framing per item; `budgetChars` already covers the first item's
  */
-export function orientation(principal: Principal, budgetChars: number, share: number) {
+export function orientation(principal: Principal, budgetChars: number, share: number, itemOverheadChars = 0) {
 	const allowance = Math.floor(budgetChars * share);
 	if (!(allowance > 0)) return Promise.resolve([]);
-	return inSnapshot((barriers) => orientationIn(barriers, principal, allowance));
+	return inSnapshot((barriers) => orientationIn(barriers, principal, allowance, itemOverheadChars));
 }
 
-async function orientationIn(barriers: Barriers, principal: Principal, allowance: number) {
+async function orientationIn(barriers: Barriers, principal: Principal, allowance: number, itemOverheadChars: number) {
 	const items: { title: string; content: string }[] = [];
 	let remaining = allowance;
 	let level = (await metaSearch([{ attribute: 'top', value: true }], barriers.txn))
@@ -192,12 +193,13 @@ async function orientationIn(barriers: Barriers, principal: Principal, allowance
 		for (const meta of level) {
 			if (items.length >= MAX_ORIENTATION_ITEMS || attempts >= MAX_ORIENTATION_ATTEMPTS) break;
 			const floor = itemFloor(meta);
-			if (floor.fixed + floor.gist > remaining) continue;
+			const fixed = floor.fixed + (items.length ? itemOverheadChars : 0);
+			if (fixed + floor.gist > remaining) continue;
 			attempts++;
 			const node = await barriers.read(meta, principal);
 			if (!node) continue;
-			const item = orientationItem(view(node), remaining - floor.fixed);
-			const size = item.title.length + item.content.length;
+			const item = orientationItem(view(node), remaining - fixed);
+			const size = fixed - floor.fixed + item.title.length + item.content.length;
 			if (size > remaining) continue;
 			items.push(item);
 			remaining -= size;

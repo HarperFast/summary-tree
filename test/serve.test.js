@@ -219,3 +219,17 @@ test('an orientation item is the title, a gist ending at a boundary, and the nod
 	const below = await orientation(admin, fixed + 59, 1);
 	assert.ok(!below.some((entry) => entry.title === 't0 title'), 'below the gist floor the node is skipped');
 });
+
+test("each item after the first is charged the client's framing overhead when agent-memory reports it", async () => {
+	await manyTopics(30);
+	const size = (items) => items.reduce((sum, item) => sum + item.title.length + item.content.length, 0);
+	const plain = await orientation(admin, 4000, 0.5);
+	assert.deepEqual(await orientation(admin, 4000, 0.5, 0), plain, 'no overhead reported: unchanged');
+	const framed = await orientation(admin, 4000, 0.5, 40);
+	assert.ok(framed.length < plain.length, `${framed.length} of ${plain.length} items fit`);
+	assert.ok(size(framed) + 40 * (framed.length - 1) <= 2000);
+	assert.deepEqual(
+		framed.map((item) => item.title),
+		plain.slice(0, framed.length).map((item) => item.title),
+	);
+});

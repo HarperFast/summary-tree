@@ -147,14 +147,17 @@ embedding model and with the runner rebuilding during the run; a real embedding 
 
 `scripts/eval-orientation.mjs` seeds a synthetic corpus (30 topics, 255 memories, skewed topic sizes) into a local
 Harper with real models and counts the topics named in bootstrap's output at a fixed budget. Without orientation that
-is the caller's recent memories; with it, the orientation section first. Measured 2026-11-13 with
-`llama3.2:3b-ctx8k` and `nomic-embed-text` on Ollama:
+is the caller's recent memories; with it, the orientation section takes its share first and `recent` fills what is
+left. Measured 2026-11-14 with `llama3.2:3b-ctx8k` and `nomic-embed-text` on Ollama (13 top-level topics):
 
-| Budget (chars) | Topics covered without | Topics covered with |
-| -------------- | ---------------------- | ------------------- |
-| 2,000          | 7 / 30                 | 16 / 30             |
-| 4,000          | 11 / 30                | 21 / 30             |
-| 8,000          | 16 / 30                | 24 / 30             |
+| Budget (chars) | Topics covered without | Topics covered with | Recent memories kept with |
+| -------------- | ---------------------- | ------------------- | ------------------------- |
+| 2,000          | 7 / 30                 | 8 / 30              | 5                         |
+| 4,000          | 11 / 30                | 20 / 30             | 9                         |
+| 8,000          | 16 / 30                | 29 / 30             | 23                        |
+
+0.2.0 packed full summaries into the whole budget and covered 16, 21 and 24 topics; `recent` got only what they left
+(none in the 4,000-character deployment measurement that prompted 0.2.1).
 
 ## Development
 

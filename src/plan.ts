@@ -258,7 +258,6 @@ function incremental(input: PlanInput, byId: Map<string, ExistingNode>): Planned
 	return dropLoneTops([...planned.values()]);
 }
 
-/** Removes a top level above the leaves that holds one node, its children becoming the top. */
 function dropLoneTops(planned: PlannedNode[]): PlannedNode[] {
 	for (;;) {
 		const top = Math.max(...planned.map((node) => node.level));

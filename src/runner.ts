@@ -129,6 +129,7 @@ export class Runner {
 			conditions: [{ attribute: 'top', value: true }],
 			select: ['partition', 'labels', 'level'],
 		})) {
+			if (this.#stopped) return;
 			const nodes = tops.get(node.partition) ?? [];
 			nodes.push(node);
 			tops.set(node.partition, nodes);

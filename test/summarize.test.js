@@ -139,3 +139,9 @@ test('an empty length-stopped generation is still rejected, and cuts never split
 	const cut = gist(`Facts are valid. ${'\u{1F600}'.repeat(120)}`, 61, 60);
 	assert.ok(cut.length <= 61 && !/[\uD800-\uDBFF]…$/.test(cut));
 });
+
+test('gist: when the room is at the floor, the cut still lands on a word boundary', () => {
+	const cut = gist(`${'A'.repeat(55)} ${'longerword '.repeat(20)}`, 60, 60);
+	assert.equal(cut, `${'A'.repeat(55)}…`);
+	assert.equal(gist('word word word', 1, 60).length <= 1, true);
+});

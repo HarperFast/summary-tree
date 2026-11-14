@@ -19,7 +19,6 @@ const HIGHER_MAX_WORDS = 130;
 const TOKENS_PER_TARGET_WORD = 2.5;
 const WORDS_PER_SENTENCE = 22;
 
-/** The length instruction, sized so a model that follows it stops well before `maxTokens`. */
 export function lengthInstruction(level: number, maxTokens: number): string {
 	const maxWords = Math.max(
 		10,
@@ -48,19 +47,16 @@ function sentenceEnds(text: string): number[] {
 	return [...text.matchAll(SENTENCE_END)].map((match) => match.index + match[0].length);
 }
 
-/** At most `maxChars` (ellipsis included), cut after the last whole word at or past `minChars`, else mid-word. */
+/** At most `maxChars` (ellipsis included), cut after the last whole word at or past `minChars` (or half the room), else mid-word. */
 function cutAtWord(text: string, maxChars: number, minChars: number): string {
-	let headChars = maxChars - ELLIPSIS.length;
+	let headChars = Math.max(0, maxChars - ELLIPSIS.length);
 	if (/[\uD800-\uDBFF]/.test(text[headChars - 1] ?? '')) headChars--;
 	const head = text.slice(0, headChars);
 	const space = head.search(/\s\S*$/);
-	return `${(space >= minChars ? head.slice(0, space) : head).trimEnd()}${ELLIPSIS}`;
+	const enough = Math.min(minChars, Math.floor(head.length / 2));
+	return `${(space >= enough ? head.slice(0, space) : head).trimEnd()}${ELLIPSIS}`;
 }
 
-/**
- * The first sentence that ends at or past `minChars`, when it fits in `maxChars`; otherwise a cut at a word boundary
- * marked with an ellipsis, of at most `maxChars` characters.
- */
 export function gist(text: string, maxChars: number, minChars: number): string {
 	// a sentence end at maxChars is recognized from the few characters after it, so the rest is never scanned
 	const end = sentenceEnds(text.slice(0, maxChars + 16)).find((offset) => offset >= minChars);

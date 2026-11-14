@@ -156,7 +156,6 @@ export function orientationItem(node: NodeView, maxChars = GIST_MAX_CHARS): { ti
 	return { title: node.title, content: `${text}${itemSuffix(node)}` };
 }
 
-/** Characters of `meta`'s item outside its gist, and the least its gist may take. */
 function itemFloor(meta: any): { fixed: number; gist: number } {
 	const titleChars = meta.title?.length ?? 0;
 	return {

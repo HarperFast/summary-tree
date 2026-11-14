@@ -49,6 +49,11 @@ models.registerBackend(
 				if (!literal.startsWith('"')) continue;
 				for (const token of new Set(tokens(JSON.parse(literal)))) counts.set(token, (counts.get(token) ?? 0) + 1);
 			}
+			// a model that ran into its token cap mid-sentence
+			if (counts.has('zebra')) {
+				const content = 'TITLE: zebra herds\n\nCovers zebra stripes and herds. Grazing patt';
+				return { status: 'completed', output: { content, finishReason: 'length' } };
+			}
 			const top = [...counts].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([token]) => token);
 			const content = `TITLE: ${top.slice(0, 3).join(' ')}\n\nCovers ${top.slice(0, 40).join(' ')}.`;
 			return { status: 'completed', output: { content, finishReason: 'stop' } };

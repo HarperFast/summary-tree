@@ -3,6 +3,7 @@ import type { Principal } from '@harperfast/agent-memory';
 import { isEligible, isExpired, partitionId, partitionLabels } from './partition.ts';
 import { transaction } from 'harper';
 import { summaryTables } from './store.ts';
+import { gist } from './summarize.ts';
 
 export class SummaryError extends Error {
 	readonly statusCode: number;
@@ -24,7 +25,19 @@ async function collect<T = any>(iterable: any): Promise<T[]> {
 	return rows;
 }
 
-const META = ['id', 'partition', 'labels', 'level', 'parentId', 'top', 'memberCount', 'textChars', 'expiresAt'];
+// title is read only for its length: no text is served before the node's barrier is checked
+const META = [
+	'id',
+	'partition',
+	'labels',
+	'level',
+	'parentId',
+	'top',
+	'memberCount',
+	'title',
+	'textChars',
+	'expiresAt',
+];
 
 /**
  * Pending revoking changes for one request: an indexed probe per partition the request is about to serve, memoized,
@@ -135,8 +148,22 @@ function itemSuffix(node: { memberCount: number; id: string }): string {
 	return `\n(${node.memberCount} memories; summary node ${node.id})`;
 }
 
-export function orientationItem(node: NodeView): { title: string; content: string } {
-	return { title: node.title, content: `${node.summary}${itemSuffix(node)}` };
+const GIST_MAX_CHARS = 200;
+const GIST_MIN_CHARS = 60;
+
+/** Title, the summary's gist in at most `maxChars`, and where to read the rest. */
+export function orientationItem(node: NodeView, maxChars = GIST_MAX_CHARS): { title: string; content: string } {
+	const text = gist(node.summary, Math.min(GIST_MAX_CHARS, maxChars), GIST_MIN_CHARS);
+	return { title: node.title, content: `${text}${itemSuffix(node)}` };
+}
+
+/** Characters of `meta`'s item outside its gist, and the least its gist may take. */
+function itemFloor(meta: any): { fixed: number; gist: number } {
+	const titleChars = meta.title?.length ?? 0;
+	return {
+		fixed: titleChars + itemSuffix(meta).length,
+		gist: Math.min(Math.max(0, (meta.textChars ?? 0) - titleChars), GIST_MIN_CHARS),
+	};
 }
 
 const MAX_ORIENTATION_ITEMS = 64;
@@ -145,15 +172,18 @@ const MAX_ORIENTATION_ATTEMPTS = 128;
 
 /**
  * The orientation section: the top levels of every readable tree, breadth first and largest first within a level,
- * packed into the budget agent-memory left. A node that does not fit is skipped along with its subtree.
+ * packed into `share` of the budget agent-memory left, so the sections it packs afterwards (recent, relevant) keep
+ * the rest. A node that does not fit is skipped along with its subtree.
  */
-export function orientation(principal: Principal, budgetChars: number) {
-	return inSnapshot((barriers) => orientationIn(barriers, principal, budgetChars));
+export function orientation(principal: Principal, budgetChars: number, share: number) {
+	const allowance = Math.floor(budgetChars * share);
+	if (!(allowance > 0)) return Promise.resolve([]);
+	return inSnapshot((barriers) => orientationIn(barriers, principal, allowance));
 }
 
-async function orientationIn(barriers: Barriers, principal: Principal, budgetChars: number) {
+async function orientationIn(barriers: Barriers, principal: Principal, allowance: number) {
 	const items: { title: string; content: string }[] = [];
-	let remaining = budgetChars;
+	let remaining = allowance;
 	let level = (await metaSearch([{ attribute: 'top', value: true }], barriers.txn))
 		.filter(readableMeta(principal))
 		.sort(bySize);
@@ -162,11 +192,12 @@ async function orientationIn(barriers: Barriers, principal: Principal, budgetCha
 		const next: any[] = [];
 		for (const meta of level) {
 			if (items.length >= MAX_ORIENTATION_ITEMS || attempts >= MAX_ORIENTATION_ATTEMPTS) break;
-			if ((meta.textChars ?? 0) + itemSuffix(meta).length > remaining) continue;
+			const floor = itemFloor(meta);
+			if (floor.fixed + floor.gist > remaining) continue;
 			attempts++;
 			const node = await barriers.read(meta, principal);
 			if (!node) continue;
-			const item = orientationItem(view(node));
+			const item = orientationItem(view(node), remaining - floor.fixed);
 			const size = item.title.length + item.content.length;
 			if (size > remaining) continue;
 			items.push(item);

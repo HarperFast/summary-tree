@@ -79,14 +79,14 @@ test('partition size decides the shape: none below the flat minimum, one flat no
 	assert.equal(flat.clusteredSize, null);
 
 	const tree = await planPartition({
-		members: members(3, 8),
+		members: members(6, 8),
 		nodes: [],
 		clusteredSize: null,
 		revoked: new Set(),
 		settings,
 		newId,
 	});
-	assert.equal(tree.clusteredSize, 24);
+	assert.equal(tree.clusteredSize, 48);
 	const leaves = tree.nodes.filter((n) => n.level === 1);
 	assert.ok(leaves.length >= 4);
 	assert.ok(
@@ -134,7 +134,7 @@ test('a re-cluster keeps node ids by member overlap and keeps text below the dir
 
 test('incremental: a new member below the threshold keeps text; a removed, revised or revoked source forces a rebuild', async () => {
 	const first = await planPartition({
-		members: members(3, 8),
+		members: members(6, 8),
 		nodes: [],
 		clusteredSize: null,
 		revoked: new Set(),
@@ -143,12 +143,12 @@ test('incremental: a new member below the threshold keeps text; a removed, revis
 	});
 	const existing = asExisting(first);
 	const leafOf = first.leafOf;
-	const withLeaves = members(3, 8).map((m) => ({ ...m, leafId: leafOf.get(m.id) }));
+	const withLeaves = members(6, 8).map((m) => ({ ...m, leafId: leafOf.get(m.id) }));
 
 	const unchanged = await planPartition({
 		members: withLeaves,
 		nodes: existing,
-		clusteredSize: 24,
+		clusteredSize: 48,
 		revoked: new Set(),
 		settings,
 		newId,
@@ -160,7 +160,7 @@ test('incremental: a new member below the threshold keeps text; a removed, revis
 	const belowThreshold = await planPartition({
 		members: [...withLeaves, joined],
 		nodes: existing,
-		clusteredSize: 24,
+		clusteredSize: 48,
 		revoked: new Set(),
 		settings,
 		newId,
@@ -175,7 +175,7 @@ test('incremental: a new member below the threshold keeps text; a removed, revis
 	const removed = await planPartition({
 		members: rest,
 		nodes: existing,
-		clusteredSize: 24,
+		clusteredSize: 48,
 		revoked: new Set(),
 		settings,
 		newId,
@@ -187,7 +187,7 @@ test('incremental: a new member below the threshold keeps text; a removed, revis
 	const revised = await planPartition({
 		members: [{ ...victim, revision: 2 }, ...rest],
 		nodes: existing,
-		clusteredSize: 24,
+		clusteredSize: 48,
 		revoked: new Set(),
 		settings,
 		newId,
@@ -196,7 +196,7 @@ test('incremental: a new member below the threshold keeps text; a removed, revis
 	const rewritten = await planPartition({
 		members: [{ ...victim, hash: 'other-text' }, ...rest],
 		nodes: existing,
-		clusteredSize: 24,
+		clusteredSize: 48,
 		revoked: new Set(),
 		settings,
 		newId,
@@ -209,7 +209,7 @@ test('incremental: a new member below the threshold keeps text; a removed, revis
 	const revoked = await planPartition({
 		members: rest,
 		nodes: existing,
-		clusteredSize: 24,
+		clusteredSize: 48,
 		revoked: new Set([victim.id]),
 		settings,
 		newId,
@@ -249,4 +249,101 @@ test('a flat node that falls below the flat minimum is deleted', async () => {
 	assert.deepEqual(shrunk.nodes, []);
 	assert.deepEqual(shrunk.deleteIds, [flat.nodes[0].id]);
 	assert.ok([...shrunk.leafOf.values()].every((leaf) => leaf === null));
+});
+
+// `topics` well-separated topics of `size` members each, in 32 dimensions; `near` topics share a common direction
+function wideMembers(topics, size, near = 0) {
+	const out = [];
+	for (let g = 0; g < topics; g++) {
+		for (let i = 0; i < size; i++) {
+			const v = new Array(32).fill(0.01);
+			v[g] = 1;
+			if (g < near) v[30] = 3;
+			v[31] = 0.02 * i;
+			out.push({ id: `w${g}-m${i}`, revision: 1, vector: normalize(v), leafId: null });
+		}
+	}
+	return out;
+}
+
+function levelSizes(plan) {
+	const sizes = new Map();
+	for (const node of plan.nodes) sizes.set(node.level, (sizes.get(node.level) ?? 0) + 1);
+	return sizes;
+}
+
+const wide = { ...DEFAULT_SETTINGS, treeMinMembers: 40, leafClusterSize: 15, fanout: 10, topFloor: 6 };
+
+test('planning never builds a level above the leaves with a single node', async () => {
+	// 9 leaves: above topFloor 6, but one parent at fanout 10
+	const nine = await planPartition({
+		members: wideMembers(9, 15),
+		nodes: [],
+		clusteredSize: null,
+		revoked: new Set(),
+		settings: wide,
+		newId,
+	});
+	assert.deepEqual([...levelSizes(nine)], [[1, 9]]);
+	assert.ok(nine.nodes.every((node) => node.parentId === null));
+
+	// 15 leaves ask for two parents, but 14 lie together and k-means folds the lone one into their group
+	const folded = await planPartition({
+		members: wideMembers(15, 15, 14),
+		nodes: [],
+		clusteredSize: null,
+		revoked: new Set(),
+		settings: wide,
+		newId,
+	});
+	const sizes = levelSizes(folded);
+	assert.equal(sizes.get(1), 15);
+	for (const [level, count] of sizes) assert.ok(level === 1 || count > 1, `level ${level} has ${count} node(s)`);
+	assert.ok(folded.nodes.filter((node) => node.parentId === null).length > 1);
+});
+
+test('a stored tree with a single top node above the leaves loses it on the next incremental pass', async () => {
+	const first = await planPartition({
+		members: members(6, 8),
+		nodes: [],
+		clusteredSize: null,
+		revoked: new Set(),
+		settings,
+		newId,
+	});
+	const existing = asExisting(first);
+	const topLevel = Math.max(...existing.map((node) => node.level));
+	const tops = existing.filter((node) => node.parentId === null);
+	assert.ok(tops.length > 1);
+	const root = {
+		id: 'legacy-root',
+		level: topLevel + 1,
+		parentId: null,
+		centroid: tops[0].centroid,
+		builtFrom: tops.map((node) => node.id),
+		sourceIds: tops.flatMap((node) => node.sourceIds),
+		summary: 'generic',
+	};
+	const legacy = [...existing.map((node) => (node.parentId === null ? { ...node, parentId: root.id } : node)), root];
+	const withLeaves = members(6, 8).map((m) => ({ ...m, leafId: first.leafOf.get(m.id) }));
+	const next = await planPartition({
+		members: withLeaves,
+		nodes: legacy,
+		clusteredSize: 48,
+		revoked: new Set(),
+		settings,
+		newId,
+	});
+	assert.deepEqual(next.deleteIds, [root.id]);
+	assert.deepEqual(
+		next.nodes
+			.filter((node) => node.parentId === null)
+			.map((node) => node.id)
+			.sort(),
+		tops.map((node) => node.id).sort(),
+	);
+	assert.ok(
+		next.nodes.every((node) => !node.regenerate),
+		'promoting the children needs no model call',
+	);
 });

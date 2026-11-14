@@ -201,14 +201,19 @@ async function recluster(input: PlanInput, byId: Map<string, ExistingNode>): Pro
 	});
 	const planned = [...level];
 
+	// A level of one node would summarize everything below it, hiding the topics under a generic root, so the level
+	// that would get one parent stays the top instead.
 	for (let depth = 2; level.length > settings.topFloor; depth++) {
+		const k = Math.round(level.length / settings.fanout);
+		if (k < 2) break;
 		const up = await kmeans(
 			level.map((node) => node.centroid),
-			Math.max(1, Math.round(level.length / settings.fanout)),
+			k,
 			{ minClusterSize: 2 },
 		);
 		const childGroups: PlannedNode[][] = [];
 		level.forEach((node, index) => (childGroups[up.assignments[index]] ??= []).push(node));
+		if (childGroups.length < 2) break;
 		const oldAtDepth = input.nodes
 			.filter((node) => node.level === depth)
 			.map((node) => ({ id: node.id, ids: node.builtFrom }));
@@ -221,7 +226,6 @@ async function recluster(input: PlanInput, byId: Map<string, ExistingNode>): Pro
 			return interiorNode(id, depth, group, byId.get(id), input.revoked);
 		});
 		planned.push(...level);
-		if (childGroups.length === 1) break;
 	}
 	return planned;
 }
@@ -251,7 +255,20 @@ function incremental(input: PlanInput, byId: Map<string, ExistingNode>): Planned
 			if (children.length > 0) planned.set(node.id, interiorNode(node.id, depth, children, node, input.revoked));
 		}
 	}
-	return [...planned.values()];
+	return dropLoneTops([...planned.values()]);
+}
+
+/** Removes a top level above the leaves that holds one node (trees built before recluster refused them), its
+ * children becoming the top. */
+function dropLoneTops(planned: PlannedNode[]): PlannedNode[] {
+	for (;;) {
+		const top = Math.max(...planned.map((node) => node.level));
+		const atTop = planned.filter((node) => node.level === top);
+		if (top <= 1 || atTop.length !== 1) return planned;
+		const [lone] = atTop;
+		for (const node of planned) if (node.parentId === lone.id) node.parentId = null;
+		planned = planned.filter((node) => node !== lone);
+	}
 }
 
 export async function planPartition(input: PlanInput): Promise<Plan> {

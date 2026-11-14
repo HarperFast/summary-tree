@@ -7,6 +7,7 @@ export interface Settings {
 	readonly contextTokens: number;
 	readonly charsPerToken: number;
 	readonly maxSummaryTokens: number;
+	readonly orientationShare: number;
 	readonly memberChars: number;
 	readonly leafClusterSize: number;
 	readonly fanout: number;
@@ -29,6 +30,7 @@ export const DEFAULT_SETTINGS: Settings = Object.freeze({
 	contextTokens: 8192,
 	charsPerToken: 3,
 	maxSummaryTokens: 400,
+	orientationShare: 0.5,
 	memberChars: 2000,
 	leafClusterSize: 15,
 	fanout: 10,
@@ -58,6 +60,7 @@ const INTEGER_RANGES: Partial<Record<keyof Settings, [number, number]>> = {
 
 const NUMBER_RANGES: Partial<Record<keyof Settings, [number, number]>> = {
 	charsPerToken: [1, 10],
+	orientationShare: [0.05, 1],
 	dirtyFraction: [0, 1],
 	rebuildGrowth: [1.1, 100],
 };
@@ -75,7 +78,7 @@ export function parseSettings(options: Record<string, unknown>): Settings {
 		const range = integerRange ?? numberRange;
 		if (range) {
 			const number = value as number;
-			if ((integerRange && !Number.isInteger(number)) || number < range[0] || number > range[1]) {
+			if ((integerRange && !Number.isInteger(number)) || !(number >= range[0] && number <= range[1])) {
 				throw new TypeError(`@harperfast/summary-tree: ${key} must be between ${range[0]} and ${range[1]}`);
 			}
 		}

@@ -201,3 +201,31 @@ test('a memory moved to another label set on another node revokes the partition 
 		return node && !node.sourceIds.includes(moved.id) && rows('SummaryChange').length === 0;
 	});
 });
+
+test('on startup a partition whose only top node sits above the leaves is re-planned without it', async () => {
+	await startWith([1, 2, 3, 4, 5].map((n) => memory(n)));
+	const leaf = rows('SummaryNode')[0];
+	const calls = modelState.generateCalls;
+	runner.stop();
+	// the shape 0.2.0 stored when a level got one parent
+	await databases.memory.SummaryNode.put({
+		...leaf,
+		id: 'legacy-root',
+		level: 2,
+		parentId: null,
+		top: true,
+		builtFrom: [leaf.id],
+		title: 'Generic root',
+	});
+	await databases.memory.SummaryNode.put({ ...leaf, parentId: 'legacy-root', top: false });
+
+	runner = new Runner(settings, quiet);
+	runner.start();
+	await until('the legacy root to be removed', async () => !rows('SummaryNode').some((n) => n.id === 'legacy-root'));
+	await until('its change to be absorbed', async () => rows('SummaryChange').length === 0);
+	const [promoted] = rows('SummaryNode');
+	assert.equal(promoted.id, leaf.id);
+	assert.equal(promoted.top, true);
+	assert.equal(promoted.parentId, null);
+	assert.equal(modelState.generateCalls, calls, 'no model call');
+});

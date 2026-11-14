@@ -36,8 +36,8 @@ cost and endpoints are in [README.md](README.md).
   for another reason, and the later withdrawal must still revoke.
 - **Each serving request reads in one snapshot** (`inSnapshot`, `src/serve.ts`): Harper gives every read in one
   transaction on one database a consistent snapshot, so a request's barrier decisions and the summary text it returns
-  are one point in time. Within it, serving reads node metadata without text, skips a node that cannot fit
-  the budget (`textChars`), checks the node's partition for a pending revoke (`Barriers`: one lookup on the `revokePartition` index per
+  are one point in time. Within it, serving reads node metadata without summary text (the title only for its
+  length), skips a node that cannot fit the budget (`textChars`), checks the node's partition for a pending revoke (`Barriers`: one lookup on the `revokePartition` index per
   partition, memoized for the request, never capped, so one tenant's burst hides nothing of another's), then reads
   the node.
 - **Hiding is replica-local, like agent-memory's own reads.** The change row is written in the memory's transaction
@@ -67,6 +67,10 @@ cost and endpoints are in [README.md](README.md).
   `max(dirtyMin, dirtyFraction × size)` (`membershipDelta`). Interior nodes are re-summarized whenever a child is or
   their child set changes.
 - **Ids are stable**: a re-cluster pairs each new group with the old node sharing most members (`matchByOverlap`).
+- **No level above the leaves has one node**: it would summarize the whole tree and stand in for every topic under
+  it. `recluster` stops before such a level, `dropLoneTops` removes one from a stored tree on its next pass (promoting
+  its children, with no model call), and the startup walk queues that pass for each tree stored in that shape
+  (`#queueLoneTops`).
 - **One runner at a time.** The lease row is read and written under the runner record lock (`lockRunner`:
   cluster-exclusive when Harper has record-lock transport, node-exclusive otherwise), renewed before each model call,
   and renewed through that lock inside every publish transaction (`#assertLease`). In Harper 5.4's source a write
@@ -93,3 +97,6 @@ cost and endpoints are in [README.md](README.md).
   data; the plugin adds no second framing.
 - **Prompts are sized from `contextTokens`** (`promptInputChars`, `src/settings.ts`): members are ordered most central
   first, so the budget drops the least representative.
+- **No stored summary ends where a cap cut it**: one stopped at `maxSummaryTokens` or over 2,000 characters is
+  trimmed to its last complete sentence, or cut at a word with `…` when that would drop more than half
+  (`trimToSentence`, `src/summarize.ts`). Summaries the model ended itself are stored as written.

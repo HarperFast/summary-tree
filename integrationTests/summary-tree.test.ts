@@ -13,8 +13,7 @@ const PASSWORD = 'Summary-test-1!';
 
 const memId = (tag: string) => `mem-${tag}--`.padEnd(16, '_');
 
-// Three global topics (a tree of 4 leaves under 2 interior nodes with this fixture's sizes), and one flat node each
-// for two customers. Each customer's words never appear elsewhere, so a summary that leaks one is detectable.
+// Six global topics (a tree with interior nodes at this fixture's sizes), and one flat node each for two customers. Each customer's words never appear elsewhere, so a summary that leaks one is detectable.
 const GLOBAL_TOPICS: Record<string, string[]> = {
 	replication: [
 		'replication lag between nodes',
@@ -36,6 +35,27 @@ const GLOBAL_TOPICS: Record<string, string[]> = {
 		'billing plan upgrades',
 		'billing refunds process',
 		'billing tax calculation',
+	],
+	backups: [
+		'backups nightly snapshot schedule',
+		'backups restore drill',
+		'backups offsite retention',
+		'backups encryption keys',
+		'backups verification checksums',
+	],
+	security: [
+		'security password rotation',
+		'security audit logging',
+		'security role permissions',
+		'security certificate renewal',
+		'security intrusion alerts',
+	],
+	monitoring: [
+		'monitoring latency dashboards',
+		'monitoring disk alerts',
+		'monitoring error budgets',
+		'monitoring trace sampling',
+		'monitoring uptime probes',
 	],
 };
 const ACME = [
@@ -164,7 +184,10 @@ suite('summary-tree over agent-memory running as a separate app', (ctx: ContextW
 		});
 		const writes: [string, string, string[]][] = [];
 		for (const [topic, contents] of Object.entries(GLOBAL_TOPICS)) {
-			contents.forEach((content, index) => writes.push([`${topic}${index}`, content, ['global']]));
+			// the repeated topic word outweighs the fixture embedding's hash collisions, so leaves stay within a topic
+			contents.forEach((content, index) =>
+				writes.push([`${topic}${index}`, `${content} ${topic} ${topic} ${topic}`, ['global']]),
+			);
 		}
 		ACME.forEach((content, index) => writes.push([`acme${index}`, content, ['customer:acme']]));
 		BETA.forEach((content, index) => writes.push([`beta${index}`, content, ['customer:beta']]));
@@ -211,6 +234,36 @@ suite('summary-tree over agent-memory running as a separate app', (ctx: ContextW
 			[...counts].sort((a: number, b: number) => b - a),
 		);
 		ok(entries.length > tops.length, 'subtopics fill the rest of the budget');
+	});
+
+	test('orientation takes half of a small budget and leaves the rest for recent memories', async () => {
+		const response = await call('admin', 'GET', 'Memory/bootstrap?budget=1200');
+		strictEqual(response.status, 200, JSON.stringify(response.body));
+		const memories = response.body.memories as any[];
+		const size = (entry: any) => (entry.title ?? '').length + entry.content.length;
+		const oriented = memories.filter((entry) => entry.section === 'orientation');
+		ok(oriented.length > 0, JSON.stringify(memories));
+		ok(oriented.reduce((sum, entry) => sum + size(entry), 0) <= 600, JSON.stringify(oriented));
+		ok(
+			memories.some((entry) => entry.section === 'recent'),
+			JSON.stringify(memories),
+		);
+	});
+
+	test('a summary the model cut off at its token cap is stored up to its last complete sentence', async () => {
+		for (let i = 0; i < 3; i++) {
+			const response = await call('admin', 'PUT', `Memory/${memId(`zebra${i}`)}`, {
+				title: `zebra herd ${i}`,
+				content: `zebra herd sighting ${i}`,
+				scopes: ['team:zebra'],
+			});
+			strictEqual(response.status, 201, JSON.stringify(response.body));
+		}
+		const node = await until('the zebra summary', async () => {
+			const response = await call('admin', 'GET', 'SummaryTree/');
+			return (response.body?.nodes ?? []).find((entry: any) => entry.title === 'zebra herds');
+		});
+		strictEqual(node.summary, 'Covers zebra stripes and herds.');
 	});
 
 	// agent-memory answers 503 while a new table's vector and full-text indexes build
@@ -281,6 +334,7 @@ suite('summary-tree over agent-memory running as a separate app', (ctx: ContextW
 		const tops = await call('alice', 'GET', 'SummaryTree/');
 		const interior = tops.body.nodes.find((node: any) => node.level > 1);
 		ok(interior, JSON.stringify(tops.body));
+		ok(tops.body.nodes.length > 1, 'the tree has no single root');
 		const opened = await call('alice', 'GET', `SummaryTree/${interior.id}`);
 		strictEqual(opened.status, 200);
 		ok(opened.body.children.length >= 1);

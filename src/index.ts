@@ -41,7 +41,8 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		agentMemory.registerMemorySink({ write: record, withdraw: record }),
 		agentMemory.registerBootstrapSection({
 			name: ORIENTATION_SECTION,
-			render: ({ principal, budgetChars }) => (runner.ready ? orientation(principal, budgetChars) : null),
+			render: ({ principal, budgetChars }) =>
+				runner.ready ? orientation(principal, budgetChars, runner.settings.orientationShare) : null,
 		}),
 		agentMemory.registerSearchAnnotator({
 			name: SEARCH_ANNOTATION,

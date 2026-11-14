@@ -125,10 +125,12 @@ export class Runner {
 	async #queueLoneTops(): Promise<void> {
 		const { SummaryChange, SummaryNode } = summaryTables();
 		const tops = new Map<string, any[]>();
-		for await (const node of await SummaryNode.search({
+		const topNodes = await SummaryNode.search({
 			conditions: [{ attribute: 'top', value: true }],
 			select: ['partition', 'labels', 'level'],
-		})) {
+		});
+		if (this.#stopped) return;
+		for await (const node of topNodes) {
 			if (this.#stopped) return;
 			const nodes = tops.get(node.partition) ?? [];
 			nodes.push(node);

@@ -5,8 +5,9 @@ clusters stored memories by embedding, has a generative model summarize each clu
 agent starting a session knows what is stored before it asks.
 
 - **Orientation at session start.** `GET /Memory/bootstrap` gains an `orientation` section: the top levels of every
-  summary tree the caller can read, largest topics first, inside the caller's character budget. Clients get it with
-  no change; agent-memory frames it as stored data like any memory.
+  summary tree the caller can read, largest topics first, each as its title and the first sentence of its summary,
+  inside half of the caller's remaining character budget (`orientationShare`). Clients get it with no change;
+  agent-memory frames it as stored data like any memory.
 - **Topic beside each search hit.** Search results (`GET /Memory/?q=`, MCP `recall`) carry a `summaryTree` field on
   each hit: the topic it belongs to, its summary and how many memories share it.
 - **Open a topic.** `GET /SummaryTree/<id>` returns a summary node with its subtopics, or the ids and titles of its
@@ -45,27 +46,28 @@ replication lands and the runner's next pass revokes that partition. Without rec
 Options go under the `'@harperfast/summary-tree'` key. A malformed change is logged and the previous configuration
 keeps running; `urlPath` and `mcp` take effect on restart.
 
-| Option             | Default       | Meaning                                                                                                           |
-| ------------------ | ------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `generativeModel`  | `default`     | Logical generative model that writes summaries                                                                    |
-| `embeddingModel`   | `default`     | Logical embedding model; a memory's stored vector is reused when agent-memory embedded it with this model         |
-| `contextTokens`    | `8192`        | The generative model's context window; sizes each prompt                                                          |
-| `charsPerToken`    | `3`           | Characters per token used to turn `contextTokens` into a character budget (conservative for English)              |
-| `maxSummaryTokens` | `400`         | Output tokens requested per summary                                                                               |
-| `memberChars`      | `2000`        | Characters of each memory (title and content) available to a prompt                                               |
-| `leafClusterSize`  | `15`          | Target memories per leaf topic                                                                                    |
-| `fanout`           | `10`          | Target topics per parent above the leaves                                                                         |
-| `topFloor`         | `6`           | Stop adding levels once a level has at most this many nodes                                                       |
-| `treeMinMembers`   | `40`          | A label set with at least this many memories gets a clustered tree                                                |
-| `flatMinMembers`   | `3`           | A label set with at least this many (and fewer than `treeMinMembers`) gets one summary; fewer get none            |
-| `dirtyMin`         | `2`           | A node is re-summarized after at least `max(dirtyMin, dirtyFraction × size)` member changes                       |
-| `dirtyFraction`    | `0.15`        | See `dirtyMin`                                                                                                    |
-| `rebuildGrowth`    | `2`           | Re-cluster a tree when its label set has grown or shrunk by this factor since the last clustering                 |
-| `debounceMs`       | `30000`       | Wait after a change before rebuilding, so a burst of writes costs one pass                                        |
-| `leaseMs`          | `300000`      | How long the runner lease lasts between renewals                                                                  |
-| `runner`           | `true`        | Whether this node rebuilds summaries. In a cluster without record-lock replication, leave it on for one node only |
-| `urlPath`          | `SummaryTree` | REST path of the expand endpoint                                                                                  |
-| `mcp`              | `false`       | Mount the `expand_summary` MCP tool on Harper's `/mcp` endpoint (needs Harper's MCP server enabled)               |
+| Option             | Default       | Meaning                                                                                                                                                                                             |
+| ------------------ | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `generativeModel`  | `default`     | Logical generative model that writes summaries                                                                                                                                                      |
+| `embeddingModel`   | `default`     | Logical embedding model; a memory's stored vector is reused when agent-memory embedded it with this model                                                                                           |
+| `contextTokens`    | `8192`        | The generative model's context window; sizes each prompt                                                                                                                                            |
+| `charsPerToken`    | `3`           | Characters per token used to turn `contextTokens` into a character budget (conservative for English)                                                                                                |
+| `maxSummaryTokens` | `400`         | Output tokens per summary. The prompt asks for at most `maxSummaryTokens / 2.5` words (110 for a leaf, 130 above, at most); a summary cut off at the cap is stored up to its last complete sentence |
+| `orientationShare` | `0.5`         | Share of the budget agent-memory passes the orientation section that orientation may fill, leaving the rest for `recent` and `relevant` (unused when the caller has none)                           |
+| `memberChars`      | `2000`        | Characters of each memory (title and content) available to a prompt                                                                                                                                 |
+| `leafClusterSize`  | `15`          | Target memories per leaf topic                                                                                                                                                                      |
+| `fanout`           | `10`          | Target topics per parent above the leaves                                                                                                                                                           |
+| `topFloor`         | `6`           | Stop adding levels once a level has at most this many nodes, or when the next level would have only one                                                                                             |
+| `treeMinMembers`   | `40`          | A label set with at least this many memories gets a clustered tree                                                                                                                                  |
+| `flatMinMembers`   | `3`           | A label set with at least this many (and fewer than `treeMinMembers`) gets one summary; fewer get none                                                                                              |
+| `dirtyMin`         | `2`           | A node is re-summarized after at least `max(dirtyMin, dirtyFraction × size)` member changes                                                                                                         |
+| `dirtyFraction`    | `0.15`        | See `dirtyMin`                                                                                                                                                                                      |
+| `rebuildGrowth`    | `2`           | Re-cluster a tree when its label set has grown or shrunk by this factor since the last clustering                                                                                                   |
+| `debounceMs`       | `30000`       | Wait after a change before rebuilding, so a burst of writes costs one pass                                                                                                                          |
+| `leaseMs`          | `300000`      | How long the runner lease lasts between renewals                                                                                                                                                    |
+| `runner`           | `true`        | Whether this node rebuilds summaries. In a cluster without record-lock replication, leave it on for one node only                                                                                   |
+| `urlPath`          | `SummaryTree` | REST path of the expand endpoint                                                                                                                                                                    |
+| `mcp`              | `false`       | Mount the `expand_summary` MCP tool on Harper's `/mcp` endpoint (needs Harper's MCP server enabled)                                                                                                 |
 
 ## Permissions
 
@@ -137,20 +139,26 @@ embedding model and with the runner rebuilding during the run; a real embedding 
   leaf. A node is `{ id, title, summary, level, memberCount, parentId }`.
 - MCP `expand_summary { id? }` → the same as the two routes above.
 - Search hits gain `summaryTree: { id, title, summary, level, memberCount, parentId }`.
-- Bootstrap's `orientation` items are `{ title, content: "<summary>\n(<n> memories; summary node <id>)" }`.
+- Bootstrap's `orientation` items are `{ title, content: "<gist>\n(<n> memories; summary node <id>)" }`. The gist is the
+  summary's first sentence, or at most 200 characters cut at a word and ending in `…`; the full summary is one
+  `GET /SummaryTree/<id>` or `expand_summary` away. When agent-memory reports its per-item framing cost
+  (`itemOverheadChars`, newer than 0.1.5), orientation counts it for every item after the first.
 
 ## Evaluation
 
 `scripts/eval-orientation.mjs` seeds a synthetic corpus (30 topics, 255 memories, skewed topic sizes) into a local
 Harper with real models and counts the topics named in bootstrap's output at a fixed budget. Without orientation that
-is the caller's recent memories; with it, the orientation section first. Measured 2026-11-13 with
-`llama3.2:3b-ctx8k` and `nomic-embed-text` on Ollama:
+is the caller's recent memories; with it, the orientation section takes its share first and `recent` fills what is
+left. Measured 2026-11-14 with `llama3.2:3b-ctx8k` and `nomic-embed-text` on Ollama (13 top-level topics):
 
-| Budget (chars) | Topics covered without | Topics covered with |
-| -------------- | ---------------------- | ------------------- |
-| 2,000          | 7 / 30                 | 16 / 30             |
-| 4,000          | 11 / 30                | 21 / 30             |
-| 8,000          | 16 / 30                | 24 / 30             |
+| Budget (chars) | Topics covered without | Topics covered with | Recent memories kept with |
+| -------------- | ---------------------- | ------------------- | ------------------------- |
+| 2,000          | 7 / 30                 | 8 / 30              | 5                         |
+| 4,000          | 11 / 30                | 20 / 30             | 9                         |
+| 8,000          | 16 / 30                | 29 / 30             | 23                        |
+
+0.2.0 packed full summaries into the whole budget and covered 16, 21 and 24 topics; `recent` got only what they left
+(none in the 4,000-character deployment measurement that prompted 0.2.1).
 
 ## Development
 

@@ -88,14 +88,14 @@ test('a pending revoking change hides its whole partition from every surface unt
 });
 
 test('orientation fills the budget breadth first: top nodes largest first, then their children', async () => {
-	const all = await orientation(acmeReader, 100_000);
+	const all = await orientation(acmeReader, 100_000, 1);
 	assert.deepEqual(
 		all.map((item) => item.title),
 		['global-1 title', 'acme-1 title', 'acme-beta-1 title', 'global-1a title'],
 	);
 	assert.match(all[0].content, /\(40 memories; summary node global-1\)$/);
 	const size = all[0].title.length + all[0].content.length;
-	const tight = await orientation(acmeReader, size + 5);
+	const tight = await orientation(acmeReader, size + 5, 1);
 	assert.deepEqual(
 		tight.map((item) => item.title),
 		['global-1 title'],
@@ -176,6 +176,60 @@ test('orientation stops after 128 probed candidates, served or not', async () =>
 		await node(`blocked-${i}`, scopes, { memberCount: 1000 + i });
 		await SummaryChange.put({ id: `b${i}`, partition, revokePartition: partition, revoke: true, memoryId: `m${i}` });
 	}
-	const items = await orientation(admin, 100_000);
+	const items = await orientation(admin, 100_000, 1);
 	assert.deepEqual(items, [], 'the healthy, smaller nodes lie past the attempt budget');
+});
+
+const LONG_SUMMARY =
+	'Replication streams committed transactions to every peer and resolves conflicts by timestamp. ' +
+	'Catch-up after a restart replays the audit log from the last acknowledged position. '.repeat(12);
+
+async function manyTopics(count) {
+	for (let i = 0; i < count; i++) {
+		await node(`t${i}`, [`team:t${i}`], {
+			memberCount: 100 - i,
+			summary: LONG_SUMMARY,
+			textChars: 12 + LONG_SUMMARY.length,
+		});
+	}
+}
+
+test('orientation takes at most its share of the budget, leaving the rest for the sections packed after it', async () => {
+	await manyTopics(30);
+	const items = await orientation(admin, 4000, 0.5);
+	const used = items.reduce((sum, item) => sum + item.title.length + item.content.length, 0);
+	assert.ok(items.length >= 5, `${items.length} items`);
+	assert.ok(used <= 2000, `used ${used} of a 2000-char share`);
+	assert.deepEqual(await orientation(admin, 4000, 0), []);
+});
+
+test('an orientation item is the title, a gist ending at a boundary, and the node reference', async () => {
+	await manyTopics(3);
+	const [item] = await orientation(admin, 100_000, 1);
+	const [gist, reference] = item.content.split('\n');
+	assert.equal(gist, 'Replication streams committed transactions to every peer and resolves conflicts by timestamp.');
+	assert.equal(reference, '(100 memories; summary node t0)');
+
+	// the gist shrinks to the room left, cut after a whole word
+	const fixed = item.title.length + reference.length + 1;
+	const [tight] = await orientation(admin, fixed + 70, 1);
+	const tightGist = tight.content.split('\n')[0];
+	assert.ok(tightGist.length <= 70 && tightGist.length >= 60, tightGist);
+	assert.match(tightGist, /^Replication streams committed transactions to every peer( \w+)*…$/);
+	const below = await orientation(admin, fixed + 59, 1);
+	assert.ok(!below.some((entry) => entry.title === 't0 title'), 'below the gist floor the node is skipped');
+});
+
+test("each item after the first is charged the client's framing overhead when agent-memory reports it", async () => {
+	await manyTopics(30);
+	const size = (items) => items.reduce((sum, item) => sum + item.title.length + item.content.length, 0);
+	const plain = await orientation(admin, 4000, 0.5);
+	assert.deepEqual(await orientation(admin, 4000, 0.5, 0), plain, 'no overhead reported: unchanged');
+	const framed = await orientation(admin, 4000, 0.5, 40);
+	assert.ok(framed.length < plain.length, `${framed.length} of ${plain.length} items fit`);
+	assert.ok(size(framed) + 40 * (framed.length - 1) <= 2000);
+	assert.deepEqual(
+		framed.map((item) => item.title),
+		plain.slice(0, framed.length).map((item) => item.title),
+	);
 });

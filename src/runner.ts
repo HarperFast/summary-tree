@@ -105,6 +105,8 @@ export class Runner {
 				await transaction((txn: object) => recordMemory(row, txn, { now: Date.now(), onlyIfNewer: true }));
 			}
 			if (this.#stopped) return;
+			if (this.settings.runner) await this.#queueLoneTops();
+			if (this.#stopped) return;
 			this.#ready = true;
 			this.schedule(0);
 		} catch (error) {
@@ -112,6 +114,37 @@ export class Runner {
 			const log = retryMs >= 16_000 ? this.#log.error : this.#log.debug;
 			log?.call(this.#log, `@harperfast/summary-tree: startup walk failed; retrying in ${retryMs} ms`, error);
 			if (!this.#stopped) setTimeout(() => void this.#catchUp(Math.min(retryMs * 2, 60_000)), retryMs).unref?.();
+		}
+	}
+
+	/**
+	 * Queues a rebuild of each partition whose only top node sits above the leaves, a shape planning no longer builds
+	 * (`dropLoneTops`), so stored trees lose that node on the next pass. The change id is per partition, so workers
+	 * starting together write one row.
+	 */
+	async #queueLoneTops(): Promise<void> {
+		const { SummaryChange, SummaryNode } = summaryTables();
+		const tops = new Map<string, any[]>();
+		const topNodes = await SummaryNode.search({
+			conditions: [{ attribute: 'top', value: true }],
+			select: ['partition', 'labels', 'level'],
+		});
+		if (this.#stopped) return;
+		for await (const node of topNodes) {
+			if (this.#stopped) return;
+			const nodes = tops.get(node.partition) ?? [];
+			nodes.push(node);
+			tops.set(node.partition, nodes);
+		}
+		for (const [partition, [node, ...others]] of tops) {
+			if (this.#stopped) return;
+			if (others.length || node.level <= 1) continue;
+			await transaction((txn: object) =>
+				SummaryChange.put(
+					{ id: `reshape:${partition}`, partition, labels: node.labels, revoke: false, createdAt: new Date() },
+					txn,
+				),
+			);
 		}
 	}
 
@@ -514,7 +547,9 @@ export class Runner {
 	async #orphanedPartitions(changes: readonly any[], partition: string): Promise<Map<string, any>> {
 		const { SummaryMember, SummaryNode } = summaryTables();
 		const orphaned = new Map<string, any>();
-		for (const memoryId of new Set<string>(changes.map((change) => change.memoryId))) {
+		for (const memoryId of new Set<string>(
+			changes.filter((change) => change.memoryId).map((change) => change.memoryId),
+		)) {
 			const member = await SummaryMember.get(memoryId);
 			for await (const node of await SummaryNode.search({
 				conditions: [{ attribute: 'sourceIds', value: memoryId }],

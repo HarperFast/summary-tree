@@ -1,6 +1,6 @@
 {
 	"name": "@harperfast/summary-tree",
-	"version": "0.2.0",
+	"version": "0.2.1",
 	"description": "Permission-safe topic summary trees over @harperfast/agent-memory: orientation at bootstrap and topic summaries beside search hits — a Harper plugin",
 	"license": "Apache-2.0",
 	"author": {

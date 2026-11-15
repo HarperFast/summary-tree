@@ -54,6 +54,7 @@ export class Runner {
 	#timerAt = Infinity;
 	#expiryTimer: NodeJS.Timeout | undefined;
 	#backoff = 0;
+	#retryAt = 0;
 	#rerun = false;
 	#subscription: AsyncIterator<unknown> | undefined;
 	#vectorCache = new Map<string, Vector>();
@@ -88,8 +89,9 @@ export class Runner {
 
 	schedule(delayMs: number): void {
 		if (this.#stopped) return;
-		const at = Date.now() + delayMs;
-		if (this.#timer !== undefined && this.#timerAt <= at) return;
+		// a failed pass's backoff holds: writes arriving meanwhile would otherwise retry it, model calls and all
+		const at = Math.max(Date.now() + delayMs, this.#retryAt);
+		if (this.#timer !== undefined && this.#timerAt <= at && this.#timerAt >= this.#retryAt) return;
 		clearTimeout(this.#timer);
 		this.#timerAt = at;
 		this.#timer = setTimeout(() => {
@@ -97,7 +99,7 @@ export class Runner {
 			this.#timerAt = Infinity;
 			if (this.#running) this.#rerun = true;
 			else void this.tick();
-		}, delayMs);
+		}, at - Date.now());
 		this.#timer.unref?.();
 	}
 
@@ -229,12 +231,14 @@ export class Runner {
 			}
 			if (failures > 0) throw new Error(`@harperfast/summary-tree: ${failures} partition(s) failed to rebuild`);
 			this.#backoff = 0;
+			this.#retryAt = 0;
 			if (await this.#hasWork()) this.schedule(this.settings.debounceMs);
 			else await this.#armExpiry();
 		} catch (error) {
 			if (this.#stopped) return;
 			this.#backoff = Math.min(MAX_BACKOFF_MS, Math.max(this.settings.debounceMs, 5_000, this.#backoff * 2));
 			this.#log.error?.(`@harperfast/summary-tree: maintenance failed; retrying in ${this.#backoff} ms`, error);
+			this.#retryAt = Date.now() + this.#backoff;
 			this.schedule(this.#backoff);
 		} finally {
 			this.#running = false;

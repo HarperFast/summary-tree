@@ -94,7 +94,8 @@ cost and endpoints are in [README.md](README.md).
   expired members does nothing; the only idle timer is the next `validUntil` (`#armExpiry`). Expiry needs no member
   write: the runner keeps the time up to which it has handled expiries (`SummaryState` `expiry`), and `getMemories`
   state excludes an expired memory from every rebuild. Failures back off
-  exponentially while work remains.
+  exponentially while work remains, and changes that arrive during a backoff wait for it (`schedule`), so a
+  rebuild that keeps failing is not retried, model calls and all, on every write.
 - **Clustering yields to the event loop** (`kmeans`, `src/kmeans.ts`) so a large partition does not stall the worker
   that also serves requests.
 

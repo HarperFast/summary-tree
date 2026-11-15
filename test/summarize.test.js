@@ -299,3 +299,11 @@ test('parseResponse: a TITLE line in the quotes the prompt shows it in is still 
 		'Walruses migrate in spring.\nThey return in autumn.',
 	);
 });
+
+test('parseResponse: a title derived from text that opens with dividers takes its first words', () => {
+	assert.equal(
+		parseResponse('TITLE:\n\n* * * * * * Walrus migrations run in spring.').title,
+		'Walrus migrations run in spring',
+	);
+	assert.equal(parseResponse('--- --- Replicas converge after recovery.').title, 'Replicas converge after recovery');
+});

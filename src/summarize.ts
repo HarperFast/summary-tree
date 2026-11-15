@@ -142,7 +142,8 @@ function cleanTitle(text: string): string {
 }
 
 function leadingWords(text: string): string {
-	return cleanTitle(text.split(/\s+/).slice(0, 6).join(' ')).slice(0, MAX_TITLE_CHARS);
+	const tokens = text.split(/\s+/).filter((token) => words(token));
+	return cleanTitle(tokens.slice(0, 6).join(' ')).slice(0, MAX_TITLE_CHARS);
 }
 
 /**

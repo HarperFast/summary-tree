@@ -439,3 +439,14 @@ test('a runner stopped while a model call is in flight makes no retry and renews
 	assert.equal(leaseLocks() - locksAfterStop, 1, 'only the release after the pass, no renewal for a retry');
 	assert.deepEqual(rows('SummaryNode'), before);
 });
+
+test('writes arriving during the backoff after a failed pass do not retry it early', async () => {
+	await startWith([1, 2, 3, 4, 5].map((n) => memory(n)));
+	modelState.generate = async () => ({ content: 'TITLE: Acme Walrus Notes' });
+	await write(memory(1, { content: 'changed 1', revision: 2 }));
+	await runner.tick();
+	const calls = modelState.generateCalls;
+	for (const n of [2, 3]) await write(memory(n, { content: `changed ${n}`, revision: 2 }));
+	await new Promise((resolve) => setTimeout(resolve, 300));
+	assert.equal(modelState.generateCalls, calls, 'the 5 s backoff holds although debounceMs is 0');
+});

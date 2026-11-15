@@ -253,3 +253,23 @@ test('summarize: the retry tells the model its reply had no summary', async () =
 	assert.ok(!/no summary after its title/.test(systems[0]));
 	assert.ok(systems[1].startsWith(systems[0]) && /no summary after its title/.test(systems[1]));
 });
+
+test('parseResponse: a cut reply whose long TITLE line is all that survives trimming, or a bare Summary label after an unlabeled title, has no summary', () => {
+	const long = `${'Internationalization '.repeat(5)}Rules`;
+	assert.equal(parseResponse(`TITLE: ${long}.\n\nReplicas sync via`, true).summary, '');
+	assert.equal(parseResponse(`TITLE: ${long}\n\n${long}. Sync`, true).summary, '');
+	assert.equal(parseResponse('Vector Search\n\nSummary:').summary, '');
+});
+
+test('parseResponse: a TITLE label with no words takes its title from the summary; a derived title drops markdown', () => {
+	for (const reply of [
+		'TITLE:\n\nWalrus migrations run in spring.',
+		'TITLE: ---\n\nWalrus migrations run in spring.',
+	]) {
+		assert.deepEqual(parseResponse(reply), {
+			title: 'Walrus migrations run in spring',
+			summary: 'Walrus migrations run in spring.',
+		});
+	}
+	assert.equal(parseResponse('**Replicas converge after recovery.**').title, 'Replicas converge after recovery');
+});

@@ -131,11 +131,14 @@ function words(text: string): string {
 		.trim();
 }
 
+const TITLE_MARKUP = /^["'*_#]+|["'*_]+$/g;
+
 function leadingWords(text: string): string {
 	return text
 		.split(/\s+/)
 		.slice(0, 6)
 		.join(' ')
+		.replace(TITLE_MARKUP, '')
 		.replace(/[.,;:]+$/, '');
 }
 
@@ -144,28 +147,25 @@ function leadingWords(text: string): string {
  * @param truncated the model stopped at its token cap
  */
 export function parseResponse(text: string, truncated = false): { title: string; summary: string } {
+	const capped = (summary: string) =>
+		summary && (truncated || summary.length > MAX_SUMMARY_CHARS) ? trimToSentence(summary, MAX_SUMMARY_CHARS) : summary;
 	const trimmed = text.trim();
 	const nl = trimmed.indexOf('\n');
 	const firstLine = (nl < 0 ? trimmed : trimmed.slice(0, nl)).trim();
 	const labeled = TITLE_LABEL.test(firstLine);
-	let title = firstLine.replace(TITLE_LABEL, '').replace(/^["'*_#]+|["'*_]+$/g, '');
-	const body = (nl < 0 ? '' : trimmed.slice(nl + 1)).trim().replace(SUMMARY_LABEL, '').trim();
-	if ((labeled || body) && (!words(body) || words(body) === words(title))) {
-		return { title: title.slice(0, MAX_TITLE_CHARS), summary: '' };
+	const titleLine = firstLine.replace(TITLE_LABEL, '').replace(TITLE_MARKUP, '');
+	const body = capped((nl < 0 ? '' : trimmed.slice(nl + 1)).trim().replace(SUMMARY_LABEL, '').trim());
+	if ((labeled || nl >= 0) && (!words(body) || words(body) === words(titleLine))) {
+		return { title: titleLine.slice(0, MAX_TITLE_CHARS), summary: '' };
 	}
-	const fromTitleLine = body !== '' && title.length <= MAX_TITLE_CHARS;
-	let summary = body;
-	if (!fromTitleLine) {
-		// the model skipped the title line and went straight to prose
-		summary = trimmed.replace(TITLE_LABEL, '');
-		title = leadingWords(summary);
+	if (body && titleLine.length <= MAX_TITLE_CHARS) {
+		return { title: words(titleLine) ? titleLine : leadingWords(body), summary: body };
 	}
-	if (summary && (truncated || summary.length > MAX_SUMMARY_CHARS)) {
-		summary = trimToSentence(summary, MAX_SUMMARY_CHARS);
-	}
-	// trimming can leave only a sentence that repeats the title
-	if (!words(summary) || (fromTitleLine && words(summary) === words(title))) summary = '';
-	return { title: title.slice(0, MAX_TITLE_CHARS), summary };
+	// the model skipped the title line and went straight to prose
+	const summary = capped(trimmed.replace(TITLE_LABEL, ''));
+	// trimming can leave only the title line
+	if (!words(summary) || (labeled && words(summary) === words(titleLine))) return { title: '', summary: '' };
+	return { title: leadingWords(summary).slice(0, MAX_TITLE_CHARS), summary };
 }
 
 export interface GenerateFacade {

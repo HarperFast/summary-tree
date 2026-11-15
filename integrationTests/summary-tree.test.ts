@@ -553,7 +553,7 @@ suite('summary-tree restarted over nodes an older summarizer wrote', (ctx: Conte
 	async function restart() {
 		await killHarper(ctx);
 		await startHarper(ctx, harperOptions());
-		// 200 only once the startup walk, and what it queues, is done
+		// 200 only after the startup walk has queued its rebuilds
 		await until('the startup walk', async () =>
 			(await call('GET', 'SummaryTree/')).status === 200 ? true : undefined,
 		);

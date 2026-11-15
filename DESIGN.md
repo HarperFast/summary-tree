@@ -66,11 +66,20 @@ cost and endpoints are in [README.md](README.md).
   that state (`memberRef`: id, revision, content hash) is re-summarized (`leafNode`, `src/plan.ts`); only members that joined wait for
   `max(dirtyMin, dirtyFraction × size)` (`membershipDelta`). Interior nodes are re-summarized whenever a child is or
   their child set changes.
+- **Every node names the summarizer that wrote its text** (`summarizerVersion`): a regenerated node gets
+  `SUMMARIZER_VERSION` (`src/summarize.ts`), a kept node keeps its own. **A change to the prompt or to reply parsing
+  must bump `SUMMARIZER_VERSION`**: nothing else marks stored text as the old summarizer's. The runner hands planning
+  a node with an older or missing stamp as a node without text (`isOutdated`, `Runner.rebuildPartition`), so it is
+  regenerated with its ancestors; the stamp alone never changes clustering. Every worker, runner or not, queues a
+  pass at startup for each partition holding such a node (`#queueStartupRebuilds`). An older runner can absorb that change
+  and drop the stamp, since `put` replaces the whole record, so a node's own restart on the new version is what
+  catches its old writes. A newer stamp is not outdated, so runners of two versions never re-summarize each other's
+  nodes.
 - **Ids are stable**: a re-cluster pairs each new group with the old node sharing most members (`matchByOverlap`).
 - **No level above the leaves has one node**: it would summarize the whole tree and stand in for every topic under
   it. `recluster` stops before such a level, `dropLoneTops` removes one from a stored tree on its next pass (promoting
   its children, with no model call), and the startup walk queues that pass for each tree stored in that shape
-  (`#queueLoneTops`).
+  (`#queueStartupRebuilds`).
 - **One runner at a time.** The lease row is read and written under the runner record lock (`lockRunner`:
   cluster-exclusive when Harper has record-lock transport, node-exclusive otherwise), renewed before each model call,
   and renewed through that lock inside every publish transaction (`#assertLease`). In Harper 5.4's source a write
@@ -85,7 +94,8 @@ cost and endpoints are in [README.md](README.md).
   expired members does nothing; the only idle timer is the next `validUntil` (`#armExpiry`). Expiry needs no member
   write: the runner keeps the time up to which it has handled expiries (`SummaryState` `expiry`), and `getMemories`
   state excludes an expired memory from every rebuild. Failures back off
-  exponentially while work remains.
+  exponentially while work remains, and changes that arrive during a backoff wait for it (`schedule`), so a
+  rebuild that keeps failing is not retried, model calls and all, on every write.
 - **Clustering yields to the event loop** (`kmeans`, `src/kmeans.ts`) so a large partition does not stall the worker
   that also serves requests.
 
@@ -97,6 +107,9 @@ cost and endpoints are in [README.md](README.md).
   data; the plugin adds no second framing.
 - **Prompts are sized from `contextTokens`** (`promptInputChars`, `src/settings.ts`): members are ordered most central
   first, so the budget drops the least representative.
+- **No stored summary is empty or only repeats its title** (`parseResponse`): a `TITLE:` line with nothing after it,
+  or a body equal to the title, parses to an empty summary. `summarize` asks once more, then throws, so the rebuild
+  fails and keeps its changes rather than storing a placeholder. Unlabeled one-line prose is still a summary.
 - **No stored summary ends where a cap cut it**: one stopped at `maxSummaryTokens` or over 2,000 characters is
   trimmed to its last complete sentence, or cut at a word with `…` when that would drop more than half
   (`trimToSentence`, `src/summarize.ts`). Summaries the model ended itself are stored as written.

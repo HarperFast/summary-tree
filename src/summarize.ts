@@ -35,9 +35,19 @@ export function lengthInstruction(level: number, maxTokens: number): string {
 const FORMAT_INSTRUCTIONS =
 	'Start your response with exactly one line "TITLE: <3-8 words naming the theme>", then a blank line, then the summary.';
 
+const RETRY_INSTRUCTIONS =
+	'Your previous response had no summary after its title. Write the TITLE line, a blank line, then the summary itself.';
+
+/**
+ * Bump whenever the prompt or the parsing of its reply changes: nodes stamped with a lower version, or none, are
+ * re-summarized (`summarizerVersion`, `Runner.rebuildPartition`).
+ */
+export const SUMMARIZER_VERSION = 1;
+
 const MAX_TITLE_CHARS = 100;
 const MAX_SUMMARY_CHARS = 2000;
 const ELLIPSIS = '…';
+const MAX_ATTEMPTS = 2;
 
 // A sentence ends at . ! or ? (plus closing quotes or brackets) before the end of the text, or before whitespace and
 // a character that is not lowercase, so "e.g. the" and "3.5" do not end one.
@@ -110,27 +120,58 @@ export function buildPrompt(texts: readonly string[], level: number, maxInputCha
 	};
 }
 
-/** @param truncated the model stopped at its token cap */
+const TITLE_LABEL = /^[#*_"'\s]*TITLE[*_]*\s*:[*_]*\s*/i;
+const SUMMARY_LABEL = /^[#*_\s]*Summary[*_]*\s*:[*_]*\s*/i;
+
+/** Letters and digits only, so markdown, punctuation and case do not make a repeated title look new. */
+function words(text: string): string {
+	return text
+		.toLowerCase()
+		.replace(/[^\p{L}\p{N}]+/gu, ' ')
+		.trim();
+}
+
+const TITLE_MARKUP = /^["'*_#]+|["'*_]+$/g;
+
+function cleanTitle(text: string): string {
+	return text
+		.replace(/[.,;:]+$/, '')
+		.replace(TITLE_MARKUP, '')
+		.replace(/[.,;:]+$/, '')
+		.trim();
+}
+
+function leadingWords(text: string): string {
+	const tokens = text.split(/\s+/).filter((token) => words(token));
+	return cleanTitle(tokens.slice(0, 6).join(' ')).slice(0, MAX_TITLE_CHARS);
+}
+
+/**
+ * `summary` is empty when the reply has none: a title with nothing after it, or a body that is only the title again.
+ * @param truncated the model stopped at its token cap
+ */
 export function parseResponse(text: string, truncated = false): { title: string; summary: string } {
-	const trimmed = text.trim();
+	const capped = (summary: string) =>
+		summary && (truncated || summary.length > MAX_SUMMARY_CHARS) ? trimToSentence(summary, MAX_SUMMARY_CHARS) : summary;
+	// a reply that opens with a Summary label has no title line
+	const titled = !SUMMARY_LABEL.test(text.trim());
+	const trimmed = text.trim().replace(SUMMARY_LABEL, '').trim();
 	const nl = trimmed.indexOf('\n');
-	let title = (nl < 0 ? trimmed : trimmed.slice(0, nl)).trim();
-	const rest = nl < 0 ? '' : trimmed.slice(nl + 1).trim();
-	title = title.replace(/^\**TITLE\**:?\s*/i, '').replace(/^["'*_#]+|["'*_]+$/g, '');
-	let summary = rest.replace(/^\s*Summary:\s*/i, '').trim();
-	if (title.length > MAX_TITLE_CHARS || !summary) {
-		// the model skipped the title line and went straight to prose
-		summary = trimmed.replace(/^\**TITLE\**:?\s*/i, '');
-		title = summary
-			.split(/\s+/)
-			.slice(0, 6)
-			.join(' ')
-			.replace(/[.,;:]+$/, '');
+	const firstLine = (nl < 0 ? trimmed : trimmed.slice(0, nl)).trim();
+	const labeled = TITLE_LABEL.test(firstLine);
+	const titleLine = firstLine.replace(TITLE_LABEL, '').replace(TITLE_MARKUP, '').trim();
+	const body = capped((nl < 0 ? '' : trimmed.slice(nl + 1)).trim().replace(SUMMARY_LABEL, '').trim());
+	if (titled && (labeled || nl >= 0) && (!words(body) || words(body) === words(titleLine))) {
+		return { title: titleLine.slice(0, MAX_TITLE_CHARS), summary: '' };
 	}
-	if (summary && (truncated || summary.length > MAX_SUMMARY_CHARS)) {
-		summary = trimToSentence(summary, MAX_SUMMARY_CHARS);
+	if (titled && body && titleLine.length <= MAX_TITLE_CHARS) {
+		return { title: words(titleLine) ? titleLine : leadingWords(body), summary: body };
 	}
-	return { title: title.slice(0, MAX_TITLE_CHARS), summary };
+	// the model skipped the title line and went straight to prose
+	const summary = capped(trimmed.replace(TITLE_LABEL, ''));
+	// trimming can leave only the title line
+	if (!words(summary) || (labeled && words(summary) === words(titleLine))) return { title: '', summary: '' };
+	return { title: leadingWords(summary), summary };
 }
 
 export interface GenerateFacade {
@@ -141,15 +182,26 @@ export async function summarize(
 	models: GenerateFacade,
 	texts: readonly string[],
 	level: number,
-	opts: { model: string; maxTokens: number; maxInputChars: number },
+	opts: {
+		model: string;
+		maxTokens: number;
+		maxInputChars: number;
+		/** Awaited before each model call; what it throws ends the summary with no further call. */
+		beforeCall?: () => Promise<void>;
+	},
 ): Promise<{ title: string; summary: string }> {
 	const prompt = buildPrompt(texts, level, opts.maxInputChars, opts.maxTokens);
-	const result = await models.generate(
-		{ system: prompt.system, messages: prompt.messages },
-		{ model: opts.model, maxTokens: opts.maxTokens, temperature: 0.2 },
-	);
-	const content = typeof result === 'string' ? result : (result?.content ?? '');
-	const parsed = parseResponse(content, result?.finishReason === 'length');
-	if (!parsed.summary) throw new Error('@harperfast/summary-tree: the model returned an empty summary');
-	return parsed;
+	for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+		await opts.beforeCall?.();
+		// a different request, so a deterministic or caching backend does not return the same reply
+		const system = attempt === 0 ? prompt.system : `${prompt.system}\n\n${RETRY_INSTRUCTIONS}`;
+		const result = await models.generate(
+			{ system, messages: prompt.messages },
+			{ model: opts.model, maxTokens: opts.maxTokens, temperature: 0.2 },
+		);
+		const content = typeof result === 'string' ? result : (result?.content ?? '');
+		const parsed = parseResponse(content, result?.finishReason === 'length');
+		if (parsed.summary) return parsed;
+	}
+	throw new Error(`@harperfast/summary-tree: the model returned an empty summary ${MAX_ATTEMPTS} times`);
 }

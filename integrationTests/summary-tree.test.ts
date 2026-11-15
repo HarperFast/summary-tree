@@ -480,3 +480,207 @@ suite('summary-tree installed after memories already exist', (ctx: ContextWithHa
 		ok(!/flamingo/.test(nodes[0].summary), nodes[0].summary);
 	});
 });
+
+suite('summary-tree restarted over nodes an older summarizer wrote', (ctx: ContextWithHarper) => {
+	const harperOptions = () => ({
+		harperBinPath:
+			process.env.HARPER_INTEGRATION_TEST_INSTALL_SCRIPT ??
+			join(dirname(require.resolve('harper')), 'bin', 'harper.js'),
+		config: { threads: { count: 1 }, logging: { stdStreams: true }, authentication: { authorizeLocal: false } },
+	});
+	const admin = () =>
+		'Basic ' + Buffer.from(`${ctx.harper.admin.username}:${ctx.harper.admin.password}`).toString('base64');
+	const call = async (method: string, path: string, body?: unknown) => {
+		const response = await fetch(`${ctx.harper.httpURL}/${path}`, {
+			method,
+			headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: admin() },
+			body: body === undefined ? undefined : JSON.stringify(body),
+		});
+		const text = await response.text();
+		let parsed: any;
+		try {
+			parsed = JSON.parse(text);
+		} catch {
+			parsed = text;
+		}
+		return { status: response.status, body: parsed };
+	};
+	const operation = async (body: object) => {
+		const response = await fetch(ctx.harper.operationsAPIURL, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json', Authorization: admin() },
+			body: JSON.stringify(body),
+		});
+		const text = await response.text();
+		ok(response.ok, `${JSON.stringify(body)} → ${response.status} ${text}`);
+		return JSON.parse(text);
+	};
+	const until = async <T>(what: string, probe: () => Promise<T | undefined>, timeoutMs = 60_000): Promise<T> => {
+		const deadline = Date.now() + timeoutMs;
+		for (;;) {
+			const value = await probe();
+			if (value !== undefined) return value;
+			if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+			await new Promise((resolve) => setTimeout(resolve, 250));
+		}
+	};
+	const all = (table: string): Promise<any[]> =>
+		operation({
+			operation: 'search_by_value',
+			database: 'memory',
+			table,
+			search_attribute: 'id',
+			search_value: '*',
+			get_attributes: ['*'],
+		});
+	const byId = (rows: any[]) => Object.fromEntries(rows.map((row) => [row.id, row]));
+	const generateCalls = async () => {
+		const response = await call('GET', 'GenerateCalls');
+		strictEqual(response.status, 200, JSON.stringify(response.body));
+		return response.body as { total: number; okapi: number; quagga: number };
+	};
+	const drained = async () => ((await all('SummaryChange')).length === 0 ? true : undefined);
+	// the summary-app fixture's debounceMs is 1500: a pass would have started well within this
+	const settle = () => new Promise((resolve) => setTimeout(resolve, 4_000));
+	const membership = (node: any) => ({
+		level: node.level,
+		parentId: node.parentId ?? null,
+		memberCount: node.memberCount,
+		builtFrom: [...node.builtFrom].sort(),
+		sourceIds: [...node.sourceIds].sort(),
+	});
+
+	async function restart() {
+		await killHarper(ctx);
+		await startHarper(ctx, harperOptions());
+		// 200 only after the startup walk has queued its rebuilds
+		await until('the startup walk', async () =>
+			(await call('GET', 'SummaryTree/')).status === 200 ? true : undefined,
+		);
+	}
+
+	// at once, so all three changes land before the debounced pass and none arrives during it
+	async function addMemories(word: string) {
+		const responses = await Promise.all(
+			[0, 1, 2].map((i) =>
+				call('PUT', `Memory/${memId(`${word}${i}`)}`, {
+					title: `${word} herd ${i}`,
+					content: `${word} herd sighting ${i}`,
+					scopes: [`team:${word}`],
+				}),
+			),
+		);
+		for (const response of responses) strictEqual(response.status, 201, JSON.stringify(response.body));
+	}
+
+	let stamp: number;
+
+	before(async () => {
+		const dataRootDir = await mkdtemp(
+			join(process.env.HARPER_INTEGRATION_TEST_INSTALL_PARENT_DIR || tmpdir(), 'harper-integration-test-'),
+		);
+		for (const app of ['memory-service', 'summary-app']) {
+			await cp(join(import.meta.dirname, 'fixtures', app), join(dataRootDir, 'components', app), {
+				recursive: true,
+				dereference: true,
+			});
+		}
+		(ctx as any).harper = { dataRootDir };
+		await startHarper(ctx, harperOptions());
+		for (const [topic, contents] of Object.entries(GLOBAL_TOPICS)) {
+			for (const [index, content] of contents.entries()) {
+				const response = await call('PUT', `Memory/${memId(`${topic}${index}`)}`, {
+					title: content,
+					content: `${content} ${topic} ${topic} ${topic}`,
+					scopes: ['global'],
+				});
+				strictEqual(response.status, 201, JSON.stringify(response.body));
+			}
+		}
+		await until('the global tree', async () => {
+			const nodes = await all('SummaryNode');
+			return nodes.some((node) => node.level > 1) && (await drained()) ? true : undefined;
+		});
+	});
+
+	after(async () => {
+		await teardownHarper(ctx);
+	});
+
+	test('every node carries the summarizer version, and a restart at that version makes no model call', async () => {
+		const before = await all('SummaryNode');
+		stamp = before[0].summarizerVersion;
+		strictEqual(typeof stamp, 'number', JSON.stringify(before[0]));
+		ok(
+			before.every((node) => node.summarizerVersion === stamp),
+			JSON.stringify(before),
+		);
+		ok(
+			before.some((node) => node.level > 1),
+			'the tree has interior nodes',
+		);
+
+		await restart();
+		deepStrictEqual(await all('SummaryChange'), [], 'nothing queued');
+		await settle();
+		strictEqual((await generateCalls()).total, 0);
+		deepStrictEqual(byId(await all('SummaryNode')), byId(before));
+	});
+
+	test('nodes an older summarizer wrote are re-summarized on restart, with memberships unchanged', async () => {
+		const before = await all('SummaryNode');
+		const assignments = await all('SummaryAssignment');
+		await operation({
+			operation: 'update',
+			database: 'memory',
+			table: 'SummaryNode',
+			records: before.map((node, index) => ({
+				id: node.id,
+				summary: 'Stale text from an older prompt.',
+				summarizerVersion: index % 2 ? null : stamp - 1,
+			})),
+		});
+
+		await restart();
+		await until('every node to be re-summarized', async () => {
+			const nodes = await all('SummaryNode');
+			return (await drained()) && nodes.every((node) => node.summarizerVersion === stamp) ? true : undefined;
+		});
+		const after = byId(await all('SummaryNode'));
+		deepStrictEqual(Object.keys(after).sort(), before.map((node) => node.id).sort());
+		for (const node of before) {
+			strictEqual(after[node.id].summary, node.summary, 'the fixture model rewrote the text from the same members');
+			deepStrictEqual(membership(after[node.id]), membership(node));
+		}
+		strictEqual((await generateCalls()).total, before.length, 'one model call per node');
+		deepStrictEqual(byId(await all('SummaryAssignment')), byId(assignments));
+	});
+
+	test('a reply with only a title is asked again, and the second reply is stored', async () => {
+		await addMemories('okapi');
+		const node = await until('the okapi summary', async () =>
+			(await all('SummaryNode')).find((entry) => entry.sourceIds?.includes(memId('okapi0'))),
+		);
+		ok(/okapi/.test(node.summary) && node.summary !== node.title, JSON.stringify(node));
+		strictEqual(node.summarizerVersion, stamp);
+		strictEqual((await generateCalls()).okapi, 2);
+	});
+
+	test('two title-only replies store nothing and keep the work queued; the next pass stores a summary', async () => {
+		await addMemories('quagga');
+		const quagga = (rows: any[]) => rows.filter((row) => (row.labels ?? []).includes('team:quagga'));
+		// the failed pass backs the runner off for at least 5 s, so the next attempt cannot have started yet
+		await until('both title-only replies', async () => ((await generateCalls()).quagga >= 2 ? true : undefined));
+		deepStrictEqual(quagga(await all('SummaryNode')), [], 'no placeholder is stored');
+		ok(quagga(await all('SummaryChange')).length > 0, 'the change is kept for the next pass');
+		strictEqual((await generateCalls()).quagga, 2);
+		const node = await until(
+			'the quagga summary after the runner backs off',
+			async () => quagga(await all('SummaryNode'))[0],
+			90_000,
+		);
+		ok(/quagga/.test(node.summary) && node.summary !== node.title, JSON.stringify(node));
+		strictEqual((await generateCalls()).quagga, 3);
+		await until('the quagga change to be absorbed', drained);
+	});
+});

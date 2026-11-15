@@ -39,6 +39,8 @@ type SummaryNode @table(database: "memory") {
 	# every memory whose text this node's summary was derived from, directly or through children
 	sourceIds: [String] @indexed
 	summarizedAt: Date
+	# SUMMARIZER_VERSION of the prompt and parser that wrote title and summary; missing on nodes stored before 0.2.2
+	summarizerVersion: Int
 	# earliest validUntil among the memories its text came from; serving stops at it
 	expiresAt: Date
 }

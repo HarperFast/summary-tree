@@ -8,11 +8,12 @@ import { contentHash, isEligible, memberText, partitionId, partitionLabels } fro
 import { memberRef, planPartition, type ExistingNode, type PlanMember } from './plan.ts';
 import { promptInputChars, type Settings } from './settings.ts';
 import { recordMemory, summaryTables } from './store.ts';
-import { summarize } from './summarize.ts';
+import { SUMMARIZER_VERSION, summarize } from './summarize.ts';
 
 const RUNNER_ID = 'runner';
 const EXPIRY_ID = 'expiry';
 const EMBED_BATCH = 32;
+const QUEUE_BATCH = 100;
 const VECTOR_CACHE_LIMIT = 50_000;
 const MAX_BACKOFF_MS = 30 * 60_000;
 // setTimeout's ceiling; a later expiry is re-armed when this fires
@@ -32,6 +33,10 @@ class LeaseLostError extends Error {
 	}
 }
 
+function isOutdated(version: unknown): boolean {
+	return typeof version !== 'number' || version < SUMMARIZER_VERSION;
+}
+
 async function collect<T>(iterable: AsyncIterable<T> | Iterable<T> | Promise<AsyncIterable<T>>): Promise<T[]> {
 	const rows: T[] = [];
 	for await (const row of await iterable) rows.push(row);
@@ -49,6 +54,7 @@ export class Runner {
 	#timerAt = Infinity;
 	#expiryTimer: NodeJS.Timeout | undefined;
 	#backoff = 0;
+	#retryAt = 0;
 	#rerun = false;
 	#subscription: AsyncIterator<unknown> | undefined;
 	#vectorCache = new Map<string, Vector>();
@@ -83,8 +89,9 @@ export class Runner {
 
 	schedule(delayMs: number): void {
 		if (this.#stopped) return;
-		const at = Date.now() + delayMs;
-		if (this.#timer !== undefined && this.#timerAt <= at) return;
+		// a failed pass's backoff holds: writes arriving meanwhile would otherwise retry it, model calls and all
+		const at = Math.max(Date.now() + delayMs, this.#retryAt);
+		if (this.#timer !== undefined && this.#timerAt <= at && this.#timerAt >= this.#retryAt) return;
 		clearTimeout(this.#timer);
 		this.#timerAt = at;
 		this.#timer = setTimeout(() => {
@@ -92,7 +99,7 @@ export class Runner {
 			this.#timerAt = Infinity;
 			if (this.#running) this.#rerun = true;
 			else void this.tick();
-		}, delayMs);
+		}, at - Date.now());
 		this.#timer.unref?.();
 	}
 
@@ -105,7 +112,7 @@ export class Runner {
 				await transaction((txn: object) => recordMemory(row, txn, { now: Date.now(), onlyIfNewer: true }));
 			}
 			if (this.#stopped) return;
-			if (this.settings.runner) await this.#queueLoneTops();
+			await this.#queueStartupRebuilds();
 			if (this.#stopped) return;
 			this.#ready = true;
 			this.schedule(0);
@@ -118,33 +125,42 @@ export class Runner {
 	}
 
 	/**
-	 * Queues a rebuild of each partition whose only top node sits above the leaves, a shape planning no longer builds
-	 * (`dropLoneTops`), so stored trees lose that node on the next pass. The change id is per partition, so workers
-	 * starting together write one row.
+	 * Queues a rebuild of each partition holding a node an older summarizer wrote, whose text planning then treats as
+	 * missing, and, on a runner, of each partition whose only top node sits above the leaves, a shape planning no longer
+	 * builds (`dropLoneTops`). Every worker queues outdated partitions: a node whose older runner wrote nodes after this
+	 * version's workers had started queues them on its own restart. The change id is per partition, so workers starting
+	 * together write one row.
 	 */
-	async #queueLoneTops(): Promise<void> {
+	async #queueStartupRebuilds(): Promise<void> {
 		const { SummaryChange, SummaryNode } = summaryTables();
-		const tops = new Map<string, any[]>();
-		const topNodes = await SummaryNode.search({
-			conditions: [{ attribute: 'top', value: true }],
-			select: ['partition', 'labels', 'level'],
-		});
+		const queued = new Map<string, readonly string[]>();
+		const tops = new Map<string, { level: number; labels: readonly string[]; count: number }>();
+		const nodes = await SummaryNode.search({ select: ['partition', 'labels', 'level', 'top', 'summarizerVersion'] });
 		if (this.#stopped) return;
-		for await (const node of topNodes) {
+		for await (const node of nodes) {
 			if (this.#stopped) return;
-			const nodes = tops.get(node.partition) ?? [];
-			nodes.push(node);
-			tops.set(node.partition, nodes);
+			const labels = node.labels ?? [];
+			if (isOutdated(node.summarizerVersion)) queued.set(node.partition, labels);
+			if (node.top) {
+				const count = (tops.get(node.partition)?.count ?? 0) + 1;
+				tops.set(node.partition, { level: node.level, labels, count });
+			}
 		}
-		for (const [partition, [node, ...others]] of tops) {
+		if (this.settings.runner) {
+			for (const [partition, top] of tops) if (top.count === 1 && top.level > 1) queued.set(partition, top.labels);
+		}
+		const rows = [...queued];
+		for (let start = 0; start < rows.length; start += QUEUE_BATCH) {
 			if (this.#stopped) return;
-			if (others.length || node.level <= 1) continue;
-			await transaction((txn: object) =>
-				SummaryChange.put(
-					{ id: `reshape:${partition}`, partition, labels: node.labels, revoke: false, createdAt: new Date() },
-					txn,
-				),
-			);
+			await transaction(async (txn: object) => {
+				for (const [partition, labels] of rows.slice(start, start + QUEUE_BATCH)) {
+					if (this.#stopped) return;
+					await SummaryChange.put(
+						{ id: `reshape:${partition}`, partition, labels, revoke: false, createdAt: new Date() },
+						txn,
+					);
+				}
+			});
 		}
 	}
 
@@ -215,12 +231,14 @@ export class Runner {
 			}
 			if (failures > 0) throw new Error(`@harperfast/summary-tree: ${failures} partition(s) failed to rebuild`);
 			this.#backoff = 0;
+			this.#retryAt = 0;
 			if (await this.#hasWork()) this.schedule(this.settings.debounceMs);
 			else await this.#armExpiry();
 		} catch (error) {
 			if (this.#stopped) return;
 			this.#backoff = Math.min(MAX_BACKOFF_MS, Math.max(this.settings.debounceMs, 5_000, this.#backoff * 2));
 			this.#log.error?.(`@harperfast/summary-tree: maintenance failed; retrying in ${this.#backoff} ms`, error);
+			this.#retryAt = Date.now() + this.#backoff;
 			this.schedule(this.#backoff);
 		} finally {
 			this.#running = false;
@@ -274,6 +292,12 @@ export class Runner {
 
 	async #renewLease(): Promise<void> {
 		await this.#acquireLease(true);
+	}
+
+	async #beforeModelCall(): Promise<void> {
+		if (this.#stopped) throw new LeaseLostError();
+		await this.#renewLease();
+		if (this.#stopped) throw new LeaseLostError();
 	}
 
 	/**
@@ -421,7 +445,8 @@ export class Runner {
 				centroid: node.centroid ?? null,
 				builtFrom: node.builtFrom ?? [],
 				sourceIds: node.sourceIds ?? [],
-				summary: node.summary ?? null,
+				// counted as no text, so planning re-summarizes it without re-clustering
+				summary: isOutdated(node.summarizerVersion) ? null : (node.summary ?? null),
 			})),
 			// centroids from another embedding model are in another vector space
 			clusteredSize: meta?.embeddingModel === settings.embeddingModel ? (meta?.clusteredSize ?? null) : null,
@@ -452,12 +477,11 @@ export class Runner {
 				const texts = leaf
 					? node.memberIds.map((id) => textOf.get(id)!)
 					: children.map((child) => `${child.title}: ${child.summary}`);
-				await this.#renewLease();
-				if (this.#stopped) throw new LeaseLostError();
 				const { title, summary } = await summarize(models, texts, node.level, {
 					model: settings.generativeModel,
 					maxTokens: settings.maxSummaryTokens,
 					maxInputChars,
+					beforeCall: () => this.#beforeModelCall(),
 				});
 				if (this.#stopped) throw new LeaseLostError();
 				content = {
@@ -467,6 +491,7 @@ export class Runner {
 					builtFrom: leaf ? node.memberIds.map((id) => memberRef(revisionOf.get(id)!)) : node.childIds,
 					sourceIds: leaf ? node.memberIds : [...new Set(children.flatMap((child) => child.sourceIds as string[]))],
 					summarizedAt: new Date(),
+					summarizerVersion: SUMMARIZER_VERSION,
 				};
 			} else {
 				const kept = existingById.get(node.id);
@@ -477,6 +502,7 @@ export class Runner {
 					builtFrom: kept.builtFrom,
 					sourceIds: kept.sourceIds,
 					summarizedAt: kept.summarizedAt,
+					summarizerVersion: kept.summarizerVersion,
 				};
 			}
 			const sourceIds = content.sourceIds as string[];

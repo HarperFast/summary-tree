@@ -145,3 +145,165 @@ test('gist: when the room is at the floor, the cut still lands on a word boundar
 	assert.equal(cut, `${'A'.repeat(55)}…`);
 	assert.equal(gist('word word word', 1, 60).length <= 1, true);
 });
+
+test('parseResponse: a TITLE line with nothing after it has no summary, whatever its length or markdown', () => {
+	for (const reply of [
+		'TITLE: Distributed Database Replication',
+		'**TITLE:** Distributed Database Replication\n\n',
+		'# TITLE: Distributed Database Replication\n\nSummary:',
+		`TITLE: ${'Internationalization '.repeat(6)}Considerations`,
+	]) {
+		assert.equal(parseResponse(reply).summary, '', reply);
+	}
+	assert.equal(parseResponse('**TITLE:** Vector Search').title, 'Vector Search');
+});
+
+test('parseResponse: a body that only repeats its title has no summary', () => {
+	assert.equal(parseResponse('TITLE: Vector Search\n\nVector search.').summary, '');
+	assert.equal(parseResponse('Vector Search\n\n**Vector Search**').summary, '');
+	assert.equal(parseResponse('TITLE: Vector Search\n\nSummary: vector SEARCH').summary, '');
+	assert.equal(
+		parseResponse('TITLE: Vector Search\n\nVector search uses HNSW indexes.').summary,
+		'Vector search uses HNSW indexes.',
+	);
+});
+
+test('parseResponse: one line of prose without a TITLE label is still the summary, however short', () => {
+	assert.deepEqual(parseResponse('Replicas converge after recovery.'), {
+		title: 'Replicas converge after recovery',
+		summary: 'Replicas converge after recovery.',
+	});
+});
+
+const opts = { model: 'm', maxTokens: 400, maxInputChars: 1000 };
+
+test('summarize: a reply with no summary is asked again once, then rejected', async () => {
+	let calls = 0;
+	const titleOnly = { generate: async () => (calls++, { content: 'TITLE: Acme Walrus Notes', finishReason: 'stop' }) };
+	await assert.rejects(summarize(titleOnly, ['x'], 2, opts), /empty summary/);
+	assert.equal(calls, 2);
+
+	const replies = ['TITLE: Acme Walrus Notes', 'TITLE: Acme Walrus Notes\n\nWalrus migrations run in spring.'];
+	const second = { generate: async () => ({ content: replies.shift() }) };
+	assert.deepEqual(await summarize(second, ['x'], 2, opts), {
+		title: 'Acme Walrus Notes',
+		summary: 'Walrus migrations run in spring.',
+	});
+	assert.equal(replies.length, 0);
+});
+
+test('summarize: beforeCall runs before every model call, and its failure or a model error ends it with no retry', async () => {
+	const events = [];
+	const models = {
+		async generate() {
+			events.push('generate');
+			return { content: 'TITLE: Only a title' };
+		},
+	};
+	await assert.rejects(
+		summarize(models, ['x'], 1, { ...opts, beforeCall: async () => void events.push('before') }),
+		/empty summary/,
+	);
+	assert.deepEqual(events, ['before', 'generate', 'before', 'generate']);
+
+	events.length = 0;
+	let allowed = 1;
+	const leaseLost = async () => {
+		events.push('before');
+		if (allowed-- <= 0) throw new Error('lease lost');
+	};
+	await assert.rejects(summarize(models, ['x'], 1, { ...opts, beforeCall: leaseLost }), /lease lost/);
+	assert.deepEqual(events, ['before', 'generate', 'before']);
+
+	let calls = 0;
+	const failing = {
+		async generate() {
+			calls++;
+			throw new Error('model unavailable');
+		},
+	};
+	await assert.rejects(summarize(failing, ['x'], 1, opts), /model unavailable/);
+	assert.equal(calls, 1);
+});
+
+test('parseResponse: a long TITLE line repeated as the body, a body of punctuation or a bare Summary label, and a cut reply that trims to the title have no summary', () => {
+	const long = `${'Internationalization '.repeat(6)}Considerations`;
+	for (const [reply, truncated] of [
+		[`TITLE: ${long}\n\n${long}.`, false],
+		['TITLE: Vector Search\n\n---', false],
+		['**TITLE:** Vector Search\n\n**Summary:**', false],
+		['TITLE: Distributed database replication\n\nDistributed database replication. Sync', true],
+		['---', false],
+	]) {
+		assert.equal(parseResponse(reply, truncated).summary, '', reply);
+	}
+	const prose = `TITLE: ${long} span every locale\n\nand their translations ship monthly.`;
+	assert.equal(parseResponse(prose).summary, prose.replace('TITLE: ', ''), 'a TITLE line holding prose stays prose');
+});
+
+test('summarize: the retry tells the model its reply had no summary', async () => {
+	const systems = [];
+	const models = {
+		async generate(input) {
+			systems.push(input.system);
+			return { content: systems.length === 1 ? 'TITLE: Walrus Notes' : 'TITLE: Walrus Notes\n\nWalruses migrate.' };
+		},
+	};
+	await summarize(models, ['x'], 1, opts);
+	assert.ok(!/no summary after its title/.test(systems[0]));
+	assert.ok(systems[1].startsWith(systems[0]) && /no summary after its title/.test(systems[1]));
+});
+
+test('parseResponse: a cut reply whose long TITLE line is all that survives trimming, or a bare Summary label after an unlabeled title, has no summary', () => {
+	const long = `${'Internationalization '.repeat(5)}Rules`;
+	assert.equal(parseResponse(`TITLE: ${long}.\n\nReplicas sync via`, true).summary, '');
+	assert.equal(parseResponse(`TITLE: ${long}\n\n${long}. Sync`, true).summary, '');
+	assert.equal(parseResponse('Vector Search\n\nSummary:').summary, '');
+});
+
+test('parseResponse: a TITLE label with no words takes its title from the summary; a derived title drops markdown', () => {
+	for (const reply of [
+		'TITLE:\n\nWalrus migrations run in spring.',
+		'TITLE: ---\n\nWalrus migrations run in spring.',
+	]) {
+		assert.deepEqual(parseResponse(reply), {
+			title: 'Walrus migrations run in spring',
+			summary: 'Walrus migrations run in spring.',
+		});
+	}
+	assert.equal(parseResponse('**Replicas converge after recovery.**').title, 'Replicas converge after recovery');
+});
+
+test('parseResponse: a reply that is only a Summary label has no summary; derived titles are capped and lose markdown residue', () => {
+	assert.equal(parseResponse('Summary:').summary, '');
+	assert.equal(parseResponse('**Summary:**\n\n').summary, '');
+	assert.equal(parseResponse('Summary: Walruses migrate in spring.').summary, 'Walruses migrate in spring.');
+	const identifiers = Array.from({ length: 6 }, (_, i) => `identifier_${i}_${'x'.repeat(30)}`).join(' ');
+	assert.ok(parseResponse(`TITLE:\n\n${identifiers} rest.`).title.length <= 100);
+	assert.equal(parseResponse('# Vector Search\n\nHNSW indexes power similarity search.').title, 'Vector Search');
+	assert.equal(parseResponse('**Replicas converge after recovery**.').title, 'Replicas converge after recovery');
+});
+
+test('parseResponse: a TITLE line in the quotes the prompt shows it in is still a title; a leading Summary line is not one', () => {
+	assert.equal(parseResponse('"TITLE: Acme Walrus Notes"').summary, '');
+	assert.deepEqual(parseResponse('"TITLE: Acme Walrus Notes"\n\nWalruses migrate in spring.'), {
+		title: 'Acme Walrus Notes',
+		summary: 'Walruses migrate in spring.',
+	});
+	assert.deepEqual(parseResponse('Summary:\nWalruses migrate in spring.'), {
+		title: 'Walruses migrate in spring',
+		summary: 'Walruses migrate in spring.',
+	});
+	assert.equal(
+		parseResponse('Summary: Walruses migrate in spring.\nThey return in autumn.').summary,
+		'Walruses migrate in spring.\nThey return in autumn.',
+	);
+});
+
+test('parseResponse: a title derived from text that opens with dividers takes its first words', () => {
+	assert.equal(
+		parseResponse('TITLE:\n\n* * * * * * Walrus migrations run in spring.').title,
+		'Walrus migrations run in spring',
+	);
+	assert.equal(parseResponse('--- --- Replicas converge after recovery.').title, 'Replicas converge after recovery');
+});

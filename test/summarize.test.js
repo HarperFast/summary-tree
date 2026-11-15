@@ -225,3 +225,31 @@ test('summarize: beforeCall runs before every model call, and its failure or a m
 	await assert.rejects(summarize(failing, ['x'], 1, opts), /model unavailable/);
 	assert.equal(calls, 1);
 });
+
+test('parseResponse: a long TITLE line repeated as the body, a body of punctuation or a bare Summary label, and a cut reply that trims to the title have no summary', () => {
+	const long = `${'Internationalization '.repeat(6)}Considerations`;
+	for (const [reply, truncated] of [
+		[`TITLE: ${long}\n\n${long}.`, false],
+		['TITLE: Vector Search\n\n---', false],
+		['**TITLE:** Vector Search\n\n**Summary:**', false],
+		['TITLE: Distributed database replication\n\nDistributed database replication. Sync', true],
+		['---', false],
+	]) {
+		assert.equal(parseResponse(reply, truncated).summary, '', reply);
+	}
+	const prose = `TITLE: ${long} span every locale\n\nand their translations ship monthly.`;
+	assert.equal(parseResponse(prose).summary, prose.replace('TITLE: ', ''), 'a TITLE line holding prose stays prose');
+});
+
+test('summarize: the retry tells the model its reply had no summary', async () => {
+	const systems = [];
+	const models = {
+		async generate(input) {
+			systems.push(input.system);
+			return { content: systems.length === 1 ? 'TITLE: Walrus Notes' : 'TITLE: Walrus Notes\n\nWalruses migrate.' };
+		},
+	};
+	await summarize(models, ['x'], 1, opts);
+	assert.ok(!/no summary after its title/.test(systems[0]));
+	assert.ok(systems[1].startsWith(systems[0]) && /no summary after its title/.test(systems[1]));
+});

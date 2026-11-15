@@ -35,6 +35,9 @@ export function lengthInstruction(level: number, maxTokens: number): string {
 const FORMAT_INSTRUCTIONS =
 	'Start your response with exactly one line "TITLE: <3-8 words naming the theme>", then a blank line, then the summary.';
 
+const RETRY_INSTRUCTIONS =
+	'Your previous response had no summary after its title. Write the TITLE line, a blank line, then the summary itself.';
+
 /**
  * Bump whenever the prompt or the parsing of its reply changes: nodes stamped with a lower version, or none, are
  * re-summarized (`summarizerVersion`, `Runner.rebuildPartition`).
@@ -118,6 +121,7 @@ export function buildPrompt(texts: readonly string[], level: number, maxInputCha
 }
 
 const TITLE_LABEL = /^[#*_\s]*TITLE[*_]*\s*:[*_]*\s*/i;
+const SUMMARY_LABEL = /^[#*_\s]*Summary[*_]*\s*:[*_]*\s*/i;
 
 /** Letters and digits only, so markdown, punctuation and case do not make a repeated title look new. */
 function words(text: string): string {
@@ -127,9 +131,16 @@ function words(text: string): string {
 		.trim();
 }
 
+function leadingWords(text: string): string {
+	return text
+		.split(/\s+/)
+		.slice(0, 6)
+		.join(' ')
+		.replace(/[.,;:]+$/, '');
+}
+
 /**
- * The summary is empty when the reply has none: a `TITLE:` line with nothing after it, or a body that only repeats
- * its title.
+ * `summary` is empty when the reply has none: a title with nothing after it, or a body that is only the title again.
  * @param truncated the model stopped at its token cap
  */
 export function parseResponse(text: string, truncated = false): { title: string; summary: string } {
@@ -138,23 +149,22 @@ export function parseResponse(text: string, truncated = false): { title: string;
 	const firstLine = (nl < 0 ? trimmed : trimmed.slice(0, nl)).trim();
 	const labeled = TITLE_LABEL.test(firstLine);
 	let title = firstLine.replace(TITLE_LABEL, '').replace(/^["'*_#]+|["'*_]+$/g, '');
-	const rest = nl < 0 ? '' : trimmed.slice(nl + 1).trim();
-	let summary = rest.replace(/^\s*Summary:\s*/i, '').trim();
-	if (labeled && !summary) return { title: title.slice(0, MAX_TITLE_CHARS), summary: '' };
-	if (title.length > MAX_TITLE_CHARS || !summary) {
+	const body = (nl < 0 ? '' : trimmed.slice(nl + 1)).trim().replace(SUMMARY_LABEL, '').trim();
+	if ((labeled || body) && (!words(body) || words(body) === words(title))) {
+		return { title: title.slice(0, MAX_TITLE_CHARS), summary: '' };
+	}
+	const fromTitleLine = body !== '' && title.length <= MAX_TITLE_CHARS;
+	let summary = body;
+	if (!fromTitleLine) {
 		// the model skipped the title line and went straight to prose
 		summary = trimmed.replace(TITLE_LABEL, '');
-		title = summary
-			.split(/\s+/)
-			.slice(0, 6)
-			.join(' ')
-			.replace(/[.,;:]+$/, '');
-	} else if (words(summary) === words(title)) {
-		summary = '';
+		title = leadingWords(summary);
 	}
 	if (summary && (truncated || summary.length > MAX_SUMMARY_CHARS)) {
 		summary = trimToSentence(summary, MAX_SUMMARY_CHARS);
 	}
+	// trimming can leave only a sentence that repeats the title
+	if (!words(summary) || (fromTitleLine && words(summary) === words(title))) summary = '';
 	return { title: title.slice(0, MAX_TITLE_CHARS), summary };
 }
 
@@ -162,26 +172,25 @@ export interface GenerateFacade {
 	generate(input: any, opts: any): Promise<any>;
 }
 
-export interface SummarizeOptions {
-	model: string;
-	maxTokens: number;
-	maxInputChars: number;
-	/** Awaited before each model call; what it throws ends the summary with no further call. */
-	beforeCall?: () => Promise<void>;
-}
-
-/** Asks once more when a reply has no summary, then throws rather than return a placeholder. */
 export async function summarize(
 	models: GenerateFacade,
 	texts: readonly string[],
 	level: number,
-	opts: SummarizeOptions,
+	opts: {
+		model: string;
+		maxTokens: number;
+		maxInputChars: number;
+		/** Awaited before each model call; what it throws ends the summary with no further call. */
+		beforeCall?: () => Promise<void>;
+	},
 ): Promise<{ title: string; summary: string }> {
 	const prompt = buildPrompt(texts, level, opts.maxInputChars, opts.maxTokens);
 	for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
 		await opts.beforeCall?.();
+		// a different request, so a deterministic or caching backend does not return the same reply
+		const system = attempt === 0 ? prompt.system : `${prompt.system}\n\n${RETRY_INSTRUCTIONS}`;
 		const result = await models.generate(
-			{ system: prompt.system, messages: prompt.messages },
+			{ system, messages: prompt.messages },
 			{ model: opts.model, maxTokens: opts.maxTokens, temperature: 0.2 },
 		);
 		const content = typeof result === 'string' ? result : (result?.content ?? '');

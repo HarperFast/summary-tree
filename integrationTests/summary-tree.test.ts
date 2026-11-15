@@ -559,15 +559,18 @@ suite('summary-tree restarted over nodes an older summarizer wrote', (ctx: Conte
 		);
 	}
 
+	// at once, so all three changes land before the debounced pass and none arrives during it
 	async function addMemories(word: string) {
-		for (let i = 0; i < 3; i++) {
-			const response = await call('PUT', `Memory/${memId(`${word}${i}`)}`, {
-				title: `${word} herd ${i}`,
-				content: `${word} herd sighting ${i}`,
-				scopes: [`team:${word}`],
-			});
-			strictEqual(response.status, 201, JSON.stringify(response.body));
-		}
+		const responses = await Promise.all(
+			[0, 1, 2].map((i) =>
+				call('PUT', `Memory/${memId(`${word}${i}`)}`, {
+					title: `${word} herd ${i}`,
+					content: `${word} herd sighting ${i}`,
+					scopes: [`team:${word}`],
+				}),
+			),
+		);
+		for (const response of responses) strictEqual(response.status, 201, JSON.stringify(response.body));
 	}
 
 	let stamp: number;

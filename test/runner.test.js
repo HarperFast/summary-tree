@@ -231,7 +231,7 @@ test('on startup a partition whose only top node sits above the leaves is re-pla
 	assert.equal(modelState.generateCalls, calls, 'no model call');
 });
 
-test('a runner stopped while it looks for lone top nodes stays stopped and queues nothing', async () => {
+test('a runner stopped during its startup node scan stays stopped and queues nothing', async () => {
 	await startWith([1, 2, 3, 4, 5].map((n) => memory(n)));
 	const leaf = rows('SummaryNode')[0];
 	runner.stop();
@@ -244,16 +244,14 @@ test('a runner stopped while it looks for lone top nodes stays stopped and queue
 	let entered = false;
 	const gate = new Promise((resolve) => (release = resolve));
 	SummaryNode.search = async function (query, ...rest) {
-		if (query?.conditions?.some((condition) => condition.attribute === 'top')) {
-			entered = true;
-			await gate;
-		}
+		entered = true;
+		await gate;
 		return search.call(this, query, ...rest);
 	};
 	try {
 		runner = new Runner(settings, quiet);
 		runner.start();
-		await until('the lone-top search', async () => entered);
+		await until('the startup node scan', async () => entered);
 		runner.stop();
 		release();
 		await new Promise((resolve) => setTimeout(resolve, 50));
@@ -422,4 +420,22 @@ test('a title-only reply is asked again with the lease renewed, and nothing is s
 	assert.match(node.summary, /^Summary of \d+ chars\.$/);
 	assert.ok(node.builtFrom.some((ref) => ref.startsWith(`${memory(1).id}@2:`)));
 	assert.deepEqual(rows('SummaryChange'), []);
+});
+
+test('a runner stopped while a model call is in flight makes no retry and renews no lease', async () => {
+	await startWith([1, 2, 3, 4, 5].map((n) => memory(n)));
+	const before = rows('SummaryNode');
+	const leaseLocks = () => lockCalls.filter((call) => call.table === 'SummaryState' && call.id === 'runner').length;
+	let locksAfterStop;
+	modelState.generate = async () => {
+		runner.stop();
+		locksAfterStop = leaseLocks();
+		return { content: 'TITLE: Acme Walrus Notes' };
+	};
+	const calls = modelState.generateCalls;
+	await write(memory(1, { content: 'changed 1', revision: 2 }));
+	await runner.tick();
+	assert.equal(modelState.generateCalls - calls, 1);
+	assert.equal(leaseLocks() - locksAfterStop, 1, 'only the release after the pass, no renewal for a retry');
+	assert.deepEqual(rows('SummaryNode'), before);
 });

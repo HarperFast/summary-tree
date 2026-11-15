@@ -71,7 +71,7 @@ cost and endpoints are in [README.md](README.md).
   must bump `SUMMARIZER_VERSION`**: nothing else marks stored text as the old summarizer's. The runner hands planning
   a node with an older or missing stamp as a node without text (`isOutdated`, `Runner.rebuildPartition`), so it is
   regenerated with its ancestors; the stamp alone never changes clustering. Every worker, runner or not, queues a
-  pass at startup for each partition holding such a node (`#queueOutdated`). An older runner can absorb that change
+  pass at startup for each partition holding such a node (`#queueStartupRebuilds`). An older runner can absorb that change
   and drop the stamp, since `put` replaces the whole record, so a node's own restart on the new version is what
   catches its old writes. A newer stamp is not outdated, so runners of two versions never re-summarize each other's
   nodes.
@@ -79,7 +79,7 @@ cost and endpoints are in [README.md](README.md).
 - **No level above the leaves has one node**: it would summarize the whole tree and stand in for every topic under
   it. `recluster` stops before such a level, `dropLoneTops` removes one from a stored tree on its next pass (promoting
   its children, with no model call), and the startup walk queues that pass for each tree stored in that shape
-  (`#queueLoneTops`).
+  (`#queueStartupRebuilds`).
 - **One runner at a time.** The lease row is read and written under the runner record lock (`lockRunner`:
   cluster-exclusive when Harper has record-lock transport, node-exclusive otherwise), renewed before each model call,
   and renewed through that lock inside every publish transaction (`#assertLease`). In Harper 5.4's source a write

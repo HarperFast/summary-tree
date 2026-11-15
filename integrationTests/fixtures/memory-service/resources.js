@@ -33,10 +33,10 @@ models.registerBackend(
 	}),
 );
 
-// Generate calls since this process started, in total and per trigger word below; read through GET /GenerateCalls.
+// per process, so a restart starts them at zero
 const calls = { total: 0, okapi: 0, quagga: 0 };
 
-// A model that answers with only its title: the first time for okapi memories, the first two times for quagga ones.
+// how many calls about these words get a title and no summary before the model answers properly
 const TITLE_ONLY_CALLS = { okapi: 1, quagga: 2 };
 
 export class GenerateCalls extends Resource {

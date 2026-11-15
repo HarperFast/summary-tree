@@ -33,7 +33,6 @@ class LeaseLostError extends Error {
 	}
 }
 
-/** Text written by an older summarizer, or stored before nodes carried a version. */
 function isOutdated(version: unknown): boolean {
 	return typeof version !== 'number' || version < SUMMARIZER_VERSION;
 }
@@ -111,9 +110,7 @@ export class Runner {
 				await transaction((txn: object) => recordMemory(row, txn, { now: Date.now(), onlyIfNewer: true }));
 			}
 			if (this.#stopped) return;
-			if (this.settings.runner) await this.#queueLoneTops();
-			if (this.#stopped) return;
-			await this.#queueOutdated();
+			await this.#queueStartupRebuilds();
 			if (this.#stopped) return;
 			this.#ready = true;
 			this.schedule(0);
@@ -126,56 +123,36 @@ export class Runner {
 	}
 
 	/**
-	 * Queues a rebuild of each partition whose only top node sits above the leaves, a shape planning no longer builds
-	 * (`dropLoneTops`), so stored trees lose that node on the next pass.
+	 * Queues a rebuild of each partition holding a node an older summarizer wrote, whose text planning then treats as
+	 * missing, and, on a runner, of each partition whose only top node sits above the leaves, a shape planning no longer
+	 * builds (`dropLoneTops`). Every worker queues outdated partitions: a node whose older runner wrote nodes after this
+	 * version's workers had started queues them on its own restart. The change id is per partition, so workers starting
+	 * together write one row.
 	 */
-	async #queueLoneTops(): Promise<void> {
-		const { SummaryNode } = summaryTables();
-		const tops = new Map<string, any[]>();
-		const topNodes = await SummaryNode.search({
-			conditions: [{ attribute: 'top', value: true }],
-			select: ['partition', 'labels', 'level'],
-		});
-		if (this.#stopped) return;
-		for await (const node of topNodes) {
-			if (this.#stopped) return;
-			const nodes = tops.get(node.partition) ?? [];
-			nodes.push(node);
-			tops.set(node.partition, nodes);
-		}
-		const lone = new Map<string, readonly string[]>();
-		for (const [partition, [node, ...others]] of tops) {
-			if (!others.length && node.level > 1) lone.set(partition, node.labels ?? []);
-		}
-		await this.#queueRebuilds(lone);
-	}
-
-	/**
-	 * Queues a rebuild of each partition holding a node an older summarizer wrote; planning treats that text as
-	 * missing. Every worker runs it, runner or not: a node whose older runner wrote unstamped nodes after this
-	 * version's runners had started queues them on its own restart.
-	 */
-	async #queueOutdated(): Promise<void> {
-		const outdated = new Map<string, readonly string[]>();
-		const nodes = await summaryTables().SummaryNode.search({ select: ['partition', 'labels', 'summarizerVersion'] });
+	async #queueStartupRebuilds(): Promise<void> {
+		const { SummaryChange, SummaryNode } = summaryTables();
+		const queued = new Map<string, readonly string[]>();
+		const tops = new Map<string, { level: number; labels: readonly string[]; count: number }>();
+		const nodes = await SummaryNode.search({ select: ['partition', 'labels', 'level', 'top', 'summarizerVersion'] });
 		if (this.#stopped) return;
 		for await (const node of nodes) {
 			if (this.#stopped) return;
-			if (isOutdated(node.summarizerVersion) && !outdated.has(node.partition)) {
-				outdated.set(node.partition, node.labels ?? []);
+			const labels = node.labels ?? [];
+			if (isOutdated(node.summarizerVersion)) queued.set(node.partition, labels);
+			if (node.top) {
+				const count = (tops.get(node.partition)?.count ?? 0) + 1;
+				tops.set(node.partition, { level: node.level, labels, count });
 			}
 		}
-		await this.#queueRebuilds(outdated);
-	}
-
-	/** The change id is per partition, so workers starting together write one row. */
-	async #queueRebuilds(partitions: ReadonlyMap<string, readonly string[]>): Promise<void> {
-		const { SummaryChange } = summaryTables();
-		const rows = [...partitions];
+		if (this.settings.runner) {
+			for (const [partition, top] of tops) if (top.count === 1 && top.level > 1) queued.set(partition, top.labels);
+		}
+		const rows = [...queued];
 		for (let start = 0; start < rows.length; start += QUEUE_BATCH) {
 			if (this.#stopped) return;
 			await transaction(async (txn: object) => {
 				for (const [partition, labels] of rows.slice(start, start + QUEUE_BATCH)) {
+					if (this.#stopped) return;
 					await SummaryChange.put(
 						{ id: `reshape:${partition}`, partition, labels, revoke: false, createdAt: new Date() },
 						txn,
@@ -314,6 +291,7 @@ export class Runner {
 	}
 
 	async #beforeModelCall(): Promise<void> {
+		if (this.#stopped) throw new LeaseLostError();
 		await this.#renewLease();
 		if (this.#stopped) throw new LeaseLostError();
 	}

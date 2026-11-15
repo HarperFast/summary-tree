@@ -105,7 +105,8 @@ with pending changes, reading current memory text and vectors from agent-memory 
 - Each node records the version of the prompt and reply parser that wrote it. On startup each worker queues a rebuild
   of every label set holding a node from an older version, and the rebuild re-summarizes those nodes, keeping their
   ids, topics and assignments. Old text is served until the new text is published. In a cluster, a node still on an
-  older release can write old summaries until it is upgraded; its own restart on the new release queues them.
+  older release can write old summaries until it is upgraded; its own restart on the new release queues them. If such a
+  node is removed instead, restart any upgraded node once it is gone.
 
 One worker runs the rebuilds at a time, under a lease checked again, under the runner's record lock, inside every
 publish transaction. With Harper's record-lock replication configured that lock is cluster-wide. **Without it, set
@@ -123,7 +124,7 @@ own copy of agent-memory stops serving the memory: the change row replicates in 
 | Edit, withdraw, supersede, flag, expiry, review flag or move of a summarized memory | one summary for its leaf plus one per ancestor level                                                    |
 | Re-cluster (size ×2 or ÷2)                                                          | one per new or changed topic; topics that kept their members keep their text                            |
 | Upgrade to a release that changed the summarizer version                            | one per stored node, once                                                                               |
-| A reply with no summary (a title only, or a body repeating it)                      | one more for that node; a second such reply fails the rebuild, which is retried later                   |
+| A reply with no summary (a title only, or a body repeating it)                      | one more, saying so; a second fails the label set's rebuild, and each retry repeats all of its calls    |
 
 `debounceMs` batches these: several changes to one leaf inside the window cost one call per affected node. The first
 build of a 2,000-memory partition makes about 150 calls (≈ n/15 leaves plus ≈ n/150 above them).

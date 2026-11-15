@@ -9,8 +9,10 @@
   whose summary only repeated their title get rewritten. Old text keeps being served until its replacement is
   published.
 - **Title-only replies are rejected.** A model reply with a `TITLE:` line and nothing after it, or with a body that
-  only repeats the title, is no longer stored as the summary. The runner asks once more. If the second reply has no
-  summary either, the rebuild fails and is retried later, and the previous text stays.
+  only repeats the title, is no longer stored as the summary. The runner asks once more, telling the model its reply had
+  no summary. If the second reply has none either, the rebuild fails and is retried later, and the previous text stays.
+
+## 0.2.1
 
 - **Orientation leaves room for recent memories.** The bootstrap `orientation` section fills at most half of the
   budget agent-memory passes it (new option `orientationShare`), so `recent` and `relevant` keep the rest. Before,

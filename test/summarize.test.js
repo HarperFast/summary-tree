@@ -273,3 +273,13 @@ test('parseResponse: a TITLE label with no words takes its title from the summar
 	}
 	assert.equal(parseResponse('**Replicas converge after recovery.**').title, 'Replicas converge after recovery');
 });
+
+test('parseResponse: a reply that is only a Summary label has no summary; derived titles are capped and lose markdown residue', () => {
+	assert.equal(parseResponse('Summary:').summary, '');
+	assert.equal(parseResponse('**Summary:**\n\n').summary, '');
+	assert.equal(parseResponse('Summary: Walruses migrate in spring.').summary, 'Walruses migrate in spring.');
+	const identifiers = Array.from({ length: 6 }, (_, i) => `identifier_${i}_${'x'.repeat(30)}`).join(' ');
+	assert.ok(parseResponse(`TITLE:\n\n${identifiers} rest.`).title.length <= 100);
+	assert.equal(parseResponse('# Vector Search\n\nHNSW indexes power similarity search.').title, 'Vector Search');
+	assert.equal(parseResponse('**Replicas converge after recovery**.').title, 'Replicas converge after recovery');
+});

@@ -133,13 +133,16 @@ function words(text: string): string {
 
 const TITLE_MARKUP = /^["'*_#]+|["'*_]+$/g;
 
-function leadingWords(text: string): string {
+function cleanTitle(text: string): string {
 	return text
-		.split(/\s+/)
-		.slice(0, 6)
-		.join(' ')
+		.replace(/[.,;:]+$/, '')
 		.replace(TITLE_MARKUP, '')
-		.replace(/[.,;:]+$/, '');
+		.replace(/[.,;:]+$/, '')
+		.trim();
+}
+
+function leadingWords(text: string): string {
+	return cleanTitle(text.split(/\s+/).slice(0, 6).join(' ')).slice(0, MAX_TITLE_CHARS);
 }
 
 /**
@@ -153,7 +156,7 @@ export function parseResponse(text: string, truncated = false): { title: string;
 	const nl = trimmed.indexOf('\n');
 	const firstLine = (nl < 0 ? trimmed : trimmed.slice(0, nl)).trim();
 	const labeled = TITLE_LABEL.test(firstLine);
-	const titleLine = firstLine.replace(TITLE_LABEL, '').replace(TITLE_MARKUP, '');
+	const titleLine = firstLine.replace(TITLE_LABEL, '').replace(TITLE_MARKUP, '').trim();
 	const body = capped((nl < 0 ? '' : trimmed.slice(nl + 1)).trim().replace(SUMMARY_LABEL, '').trim());
 	if ((labeled || nl >= 0) && (!words(body) || words(body) === words(titleLine))) {
 		return { title: titleLine.slice(0, MAX_TITLE_CHARS), summary: '' };
@@ -162,10 +165,10 @@ export function parseResponse(text: string, truncated = false): { title: string;
 		return { title: words(titleLine) ? titleLine : leadingWords(body), summary: body };
 	}
 	// the model skipped the title line and went straight to prose
-	const summary = capped(trimmed.replace(TITLE_LABEL, ''));
+	const summary = capped(trimmed.replace(TITLE_LABEL, '').replace(SUMMARY_LABEL, '').trim());
 	// trimming can leave only the title line
 	if (!words(summary) || (labeled && words(summary) === words(titleLine))) return { title: '', summary: '' };
-	return { title: leadingWords(summary).slice(0, MAX_TITLE_CHARS), summary };
+	return { title: leadingWords(summary), summary };
 }
 
 export interface GenerateFacade {

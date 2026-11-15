@@ -8,11 +8,12 @@ import { contentHash, isEligible, memberText, partitionId, partitionLabels } fro
 import { memberRef, planPartition, type ExistingNode, type PlanMember } from './plan.ts';
 import { promptInputChars, type Settings } from './settings.ts';
 import { recordMemory, summaryTables } from './store.ts';
-import { summarize } from './summarize.ts';
+import { SUMMARIZER_VERSION, summarize } from './summarize.ts';
 
 const RUNNER_ID = 'runner';
 const EXPIRY_ID = 'expiry';
 const EMBED_BATCH = 32;
+const QUEUE_BATCH = 100;
 const VECTOR_CACHE_LIMIT = 50_000;
 const MAX_BACKOFF_MS = 30 * 60_000;
 // setTimeout's ceiling; a later expiry is re-armed when this fires
@@ -30,6 +31,11 @@ class LeaseLostError extends Error {
 	constructor() {
 		super('@harperfast/summary-tree: the runner lease moved to another worker');
 	}
+}
+
+/** Text written by an older summarizer, or stored before nodes carried a version. */
+function isOutdated(version: unknown): boolean {
+	return typeof version !== 'number' || version < SUMMARIZER_VERSION;
 }
 
 async function collect<T>(iterable: AsyncIterable<T> | Iterable<T> | Promise<AsyncIterable<T>>): Promise<T[]> {
@@ -107,6 +113,8 @@ export class Runner {
 			if (this.#stopped) return;
 			if (this.settings.runner) await this.#queueLoneTops();
 			if (this.#stopped) return;
+			await this.#queueOutdated();
+			if (this.#stopped) return;
 			this.#ready = true;
 			this.schedule(0);
 		} catch (error) {
@@ -119,11 +127,10 @@ export class Runner {
 
 	/**
 	 * Queues a rebuild of each partition whose only top node sits above the leaves, a shape planning no longer builds
-	 * (`dropLoneTops`), so stored trees lose that node on the next pass. The change id is per partition, so workers
-	 * starting together write one row.
+	 * (`dropLoneTops`), so stored trees lose that node on the next pass.
 	 */
 	async #queueLoneTops(): Promise<void> {
-		const { SummaryChange, SummaryNode } = summaryTables();
+		const { SummaryNode } = summaryTables();
 		const tops = new Map<string, any[]>();
 		const topNodes = await SummaryNode.search({
 			conditions: [{ attribute: 'top', value: true }],
@@ -136,15 +143,45 @@ export class Runner {
 			nodes.push(node);
 			tops.set(node.partition, nodes);
 		}
+		const lone = new Map<string, readonly string[]>();
 		for (const [partition, [node, ...others]] of tops) {
+			if (!others.length && node.level > 1) lone.set(partition, node.labels ?? []);
+		}
+		await this.#queueRebuilds(lone);
+	}
+
+	/**
+	 * Queues a rebuild of each partition holding a node an older summarizer wrote; planning treats that text as
+	 * missing. Every worker runs it, runner or not: a node whose older runner wrote unstamped nodes after this
+	 * version's runners had started queues them on its own restart.
+	 */
+	async #queueOutdated(): Promise<void> {
+		const outdated = new Map<string, readonly string[]>();
+		const nodes = await summaryTables().SummaryNode.search({ select: ['partition', 'labels', 'summarizerVersion'] });
+		if (this.#stopped) return;
+		for await (const node of nodes) {
 			if (this.#stopped) return;
-			if (others.length || node.level <= 1) continue;
-			await transaction((txn: object) =>
-				SummaryChange.put(
-					{ id: `reshape:${partition}`, partition, labels: node.labels, revoke: false, createdAt: new Date() },
-					txn,
-				),
-			);
+			if (isOutdated(node.summarizerVersion) && !outdated.has(node.partition)) {
+				outdated.set(node.partition, node.labels ?? []);
+			}
+		}
+		await this.#queueRebuilds(outdated);
+	}
+
+	/** The change id is per partition, so workers starting together write one row. */
+	async #queueRebuilds(partitions: ReadonlyMap<string, readonly string[]>): Promise<void> {
+		const { SummaryChange } = summaryTables();
+		const rows = [...partitions];
+		for (let start = 0; start < rows.length; start += QUEUE_BATCH) {
+			if (this.#stopped) return;
+			await transaction(async (txn: object) => {
+				for (const [partition, labels] of rows.slice(start, start + QUEUE_BATCH)) {
+					await SummaryChange.put(
+						{ id: `reshape:${partition}`, partition, labels, revoke: false, createdAt: new Date() },
+						txn,
+					);
+				}
+			});
 		}
 	}
 
@@ -274,6 +311,11 @@ export class Runner {
 
 	async #renewLease(): Promise<void> {
 		await this.#acquireLease(true);
+	}
+
+	async #beforeModelCall(): Promise<void> {
+		await this.#renewLease();
+		if (this.#stopped) throw new LeaseLostError();
 	}
 
 	/**
@@ -421,7 +463,8 @@ export class Runner {
 				centroid: node.centroid ?? null,
 				builtFrom: node.builtFrom ?? [],
 				sourceIds: node.sourceIds ?? [],
-				summary: node.summary ?? null,
+				// counted as no text, so planning re-summarizes it without re-clustering
+				summary: isOutdated(node.summarizerVersion) ? null : (node.summary ?? null),
 			})),
 			// centroids from another embedding model are in another vector space
 			clusteredSize: meta?.embeddingModel === settings.embeddingModel ? (meta?.clusteredSize ?? null) : null,
@@ -452,12 +495,11 @@ export class Runner {
 				const texts = leaf
 					? node.memberIds.map((id) => textOf.get(id)!)
 					: children.map((child) => `${child.title}: ${child.summary}`);
-				await this.#renewLease();
-				if (this.#stopped) throw new LeaseLostError();
 				const { title, summary } = await summarize(models, texts, node.level, {
 					model: settings.generativeModel,
 					maxTokens: settings.maxSummaryTokens,
 					maxInputChars,
+					beforeCall: () => this.#beforeModelCall(),
 				});
 				if (this.#stopped) throw new LeaseLostError();
 				content = {
@@ -467,6 +509,7 @@ export class Runner {
 					builtFrom: leaf ? node.memberIds.map((id) => memberRef(revisionOf.get(id)!)) : node.childIds,
 					sourceIds: leaf ? node.memberIds : [...new Set(children.flatMap((child) => child.sourceIds as string[]))],
 					summarizedAt: new Date(),
+					summarizerVersion: SUMMARIZER_VERSION,
 				};
 			} else {
 				const kept = existingById.get(node.id);
@@ -477,6 +520,7 @@ export class Runner {
 					builtFrom: kept.builtFrom,
 					sourceIds: kept.sourceIds,
 					summarizedAt: kept.summarizedAt,
+					summarizerVersion: kept.summarizerVersion,
 				};
 			}
 			const sourceIds = content.sourceIds as string[];

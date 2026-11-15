@@ -35,9 +35,16 @@ export function lengthInstruction(level: number, maxTokens: number): string {
 const FORMAT_INSTRUCTIONS =
 	'Start your response with exactly one line "TITLE: <3-8 words naming the theme>", then a blank line, then the summary.';
 
+/**
+ * Bump whenever the prompt or the parsing of its reply changes: nodes stamped with a lower version, or none, are
+ * re-summarized (`summarizerVersion`, `Runner.rebuildPartition`).
+ */
+export const SUMMARIZER_VERSION = 1;
+
 const MAX_TITLE_CHARS = 100;
 const MAX_SUMMARY_CHARS = 2000;
 const ELLIPSIS = '…';
+const MAX_ATTEMPTS = 2;
 
 // A sentence ends at . ! or ? (plus closing quotes or brackets) before the end of the text, or before whitespace and
 // a character that is not lowercase, so "e.g. the" and "3.5" do not end one.
@@ -110,22 +117,40 @@ export function buildPrompt(texts: readonly string[], level: number, maxInputCha
 	};
 }
 
-/** @param truncated the model stopped at its token cap */
+const TITLE_LABEL = /^[#*_\s]*TITLE[*_]*\s*:[*_]*\s*/i;
+
+/** Letters and digits only, so markdown, punctuation and case do not make a repeated title look new. */
+function words(text: string): string {
+	return text
+		.toLowerCase()
+		.replace(/[^\p{L}\p{N}]+/gu, ' ')
+		.trim();
+}
+
+/**
+ * The summary is empty when the reply has none: a `TITLE:` line with nothing after it, or a body that only repeats
+ * its title.
+ * @param truncated the model stopped at its token cap
+ */
 export function parseResponse(text: string, truncated = false): { title: string; summary: string } {
 	const trimmed = text.trim();
 	const nl = trimmed.indexOf('\n');
-	let title = (nl < 0 ? trimmed : trimmed.slice(0, nl)).trim();
+	const firstLine = (nl < 0 ? trimmed : trimmed.slice(0, nl)).trim();
+	const labeled = TITLE_LABEL.test(firstLine);
+	let title = firstLine.replace(TITLE_LABEL, '').replace(/^["'*_#]+|["'*_]+$/g, '');
 	const rest = nl < 0 ? '' : trimmed.slice(nl + 1).trim();
-	title = title.replace(/^\**TITLE\**:?\s*/i, '').replace(/^["'*_#]+|["'*_]+$/g, '');
 	let summary = rest.replace(/^\s*Summary:\s*/i, '').trim();
+	if (labeled && !summary) return { title: title.slice(0, MAX_TITLE_CHARS), summary: '' };
 	if (title.length > MAX_TITLE_CHARS || !summary) {
 		// the model skipped the title line and went straight to prose
-		summary = trimmed.replace(/^\**TITLE\**:?\s*/i, '');
+		summary = trimmed.replace(TITLE_LABEL, '');
 		title = summary
 			.split(/\s+/)
 			.slice(0, 6)
 			.join(' ')
 			.replace(/[.,;:]+$/, '');
+	} else if (words(summary) === words(title)) {
+		summary = '';
 	}
 	if (summary && (truncated || summary.length > MAX_SUMMARY_CHARS)) {
 		summary = trimToSentence(summary, MAX_SUMMARY_CHARS);
@@ -137,19 +162,31 @@ export interface GenerateFacade {
 	generate(input: any, opts: any): Promise<any>;
 }
 
+export interface SummarizeOptions {
+	model: string;
+	maxTokens: number;
+	maxInputChars: number;
+	/** Awaited before each model call; what it throws ends the summary with no further call. */
+	beforeCall?: () => Promise<void>;
+}
+
+/** Asks once more when a reply has no summary, then throws rather than return a placeholder. */
 export async function summarize(
 	models: GenerateFacade,
 	texts: readonly string[],
 	level: number,
-	opts: { model: string; maxTokens: number; maxInputChars: number },
+	opts: SummarizeOptions,
 ): Promise<{ title: string; summary: string }> {
 	const prompt = buildPrompt(texts, level, opts.maxInputChars, opts.maxTokens);
-	const result = await models.generate(
-		{ system: prompt.system, messages: prompt.messages },
-		{ model: opts.model, maxTokens: opts.maxTokens, temperature: 0.2 },
-	);
-	const content = typeof result === 'string' ? result : (result?.content ?? '');
-	const parsed = parseResponse(content, result?.finishReason === 'length');
-	if (!parsed.summary) throw new Error('@harperfast/summary-tree: the model returned an empty summary');
-	return parsed;
+	for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+		await opts.beforeCall?.();
+		const result = await models.generate(
+			{ system: prompt.system, messages: prompt.messages },
+			{ model: opts.model, maxTokens: opts.maxTokens, temperature: 0.2 },
+		);
+		const content = typeof result === 'string' ? result : (result?.content ?? '');
+		const parsed = parseResponse(content, result?.finishReason === 'length');
+		if (parsed.summary) return parsed;
+	}
+	throw new Error(`@harperfast/summary-tree: the model returned an empty summary ${MAX_ATTEMPTS} times`);
 }

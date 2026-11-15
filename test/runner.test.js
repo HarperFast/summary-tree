@@ -7,6 +7,7 @@ import { DEFAULT_SETTINGS } from '../dist/settings.js';
 import { recordMemory } from '../dist/store.js';
 import { readableTopNodes } from '../dist/serve.js';
 import { partitionId } from '../dist/partition.js';
+import { SUMMARIZER_VERSION } from '../dist/summarize.js';
 
 const settings = { ...DEFAULT_SETTINGS, debounceMs: 0, treeMinMembers: 12, leafClusterSize: 4, fanout: 2, topFloor: 2 };
 const acmeReader = { id: 'bob', superUser: false, read: ['customer:acme'] };
@@ -261,4 +262,164 @@ test('a runner stopped while it looks for lone top nodes stays stopped and queue
 	} finally {
 		SummaryNode.search = search;
 	}
+});
+
+// four topics of four memories, topics 0-1 and 2-3 near each other: four leaves under two interior nodes
+const topicMemory = (topic, item) =>
+	memory(topic * 10 + item, { title: `topic ${topic} item ${item}`, content: `acme topic ${topic} note ${item}` });
+
+function topicVector(text) {
+	const [, topic, item] = /topic (\d+) item (\d+)/.exec(text);
+	const vector = new Array(8).fill(0.01);
+	vector[Number(topic)] = 1;
+	vector[Number(topic) < 2 ? 5 : 6] = 1;
+	vector[7] = 0.02 * Number(item);
+	return Float32Array.from(vector);
+}
+
+async function startTree() {
+	modelState.embed = async (texts) => texts.map(topicVector);
+	const memories = [];
+	for (let topic = 0; topic < 4; topic++) for (let item = 0; item < 4; item++) memories.push(topicMemory(topic, item));
+	await startWith(memories);
+	assert.ok(
+		rows('SummaryNode').some((node) => node.level > 1),
+		'the tree has interior nodes',
+	);
+}
+
+async function restart(runnerSettings = settings) {
+	runner.stop();
+	runner = new Runner(runnerSettings, quiet);
+	runner.start();
+	await until('the startup walk', async () => runner.ready);
+}
+
+const byId = (nodes) => Object.fromEntries(nodes.map((node) => [node.id, node]));
+const sorted = (values) => [...values].sort();
+const membership = (node) => ({
+	level: node.level,
+	parentId: node.parentId,
+	memberCount: node.memberCount,
+	builtFrom: sorted(node.builtFrom),
+	sourceIds: sorted(node.sourceIds),
+});
+
+function unstamped(node) {
+	const { summarizerVersion, ...rest } = node;
+	return rest;
+}
+
+test('every node the runner writes carries the current summarizer version', async () => {
+	await startTree();
+	const nodes = rows('SummaryNode');
+	assert.ok(nodes.length > 1);
+	assert.deepEqual(
+		nodes.map((node) => node.summarizerVersion),
+		nodes.map(() => SUMMARIZER_VERSION),
+	);
+});
+
+test('on startup, nodes an older summarizer wrote are re-summarized in place: same ids, memberships and assignments', async () => {
+	await startTree();
+	const before = rows('SummaryNode');
+	const assignments = rows('SummaryAssignment');
+	runner.stop();
+	let index = 0;
+	for (const node of before) {
+		const older = index++ % 2 ? unstamped(node) : { ...node, summarizerVersion: SUMMARIZER_VERSION - 1 };
+		await databases.memory.SummaryNode.put({ ...older, summary: 'stale text' });
+	}
+	const calls = modelState.generateCalls;
+	await restart();
+	await until(
+		'every node to be re-summarized',
+		async () =>
+			rows('SummaryChange').length === 0 && rows('SummaryNode').every((node) => node.summary !== 'stale text'),
+	);
+	const after = byId(rows('SummaryNode'));
+	assert.deepEqual(sorted(Object.keys(after)), sorted(before.map((node) => node.id)));
+	for (const node of before) {
+		assert.equal(after[node.id].summarizerVersion, SUMMARIZER_VERSION);
+		assert.notEqual(after[node.id].title, node.title, 'new text');
+		assert.deepEqual(membership(after[node.id]), membership(node));
+	}
+	assert.equal(modelState.generateCalls - calls, before.length, 'one model call per node');
+	assert.deepEqual(byId(rows('SummaryAssignment')), byId(assignments));
+});
+
+test('only outdated nodes and their ancestors are re-summarized; a node stamped by a newer version keeps its text', async () => {
+	await startTree();
+	const nodes = rows('SummaryNode');
+	const [stale, newer] = nodes.filter((node) => node.level === 1);
+	runner.stop();
+	await databases.memory.SummaryNode.put(unstamped(stale));
+	await databases.memory.SummaryNode.put({ ...newer, summarizerVersion: SUMMARIZER_VERSION + 1 });
+	const expected = [stale.id];
+	for (let parent = stale.parentId; parent; parent = nodes.find((node) => node.id === parent).parentId) {
+		expected.push(parent);
+	}
+	await restart();
+	await until(
+		'the outdated leaf to be re-summarized',
+		async () =>
+			rows('SummaryChange').length === 0 &&
+			rows('SummaryNode').find((node) => node.id === stale.id).summarizerVersion === SUMMARIZER_VERSION,
+	);
+	const after = byId(rows('SummaryNode'));
+	assert.deepEqual(
+		sorted(nodes.filter((node) => after[node.id].title !== node.title).map((node) => node.id)),
+		sorted(expected),
+	);
+	assert.equal(after[newer.id].summarizerVersion, SUMMARIZER_VERSION + 1);
+	assert.equal(after[newer.id].summary, newer.summary);
+});
+
+test('a restart with every node at the current summarizer version queues nothing and makes no model call', async () => {
+	await startTree();
+	const before = rows('SummaryNode');
+	assert.ok(before.every((node) => node.summarizerVersion === SUMMARIZER_VERSION));
+	const calls = modelState.generateCalls;
+	await restart();
+	assert.deepEqual(rows('SummaryChange'), []);
+	await runner.tick();
+	assert.equal(modelState.generateCalls, calls);
+	assert.deepEqual(rows('SummaryNode'), before);
+});
+
+test('a worker with runner: false still queues a rebuild of each partition holding outdated nodes', async () => {
+	await startTree();
+	runner.stop();
+	for (const node of rows('SummaryNode')) await databases.memory.SummaryNode.put(unstamped(node));
+	const calls = modelState.generateCalls;
+	await restart({ ...settings, runner: false });
+	assert.deepEqual(
+		rows('SummaryChange').map((change) => [change.id, change.partition, change.revoke]),
+		[[`reshape:${ACME}`, ACME, false]],
+	);
+	await runner.tick();
+	assert.equal(modelState.generateCalls, calls, 'the rebuild waits for a runner');
+});
+
+test('a title-only reply is asked again with the lease renewed, and nothing is stored when the retry is title-only too', async () => {
+	await startWith([1, 2, 3, 4, 5].map((n) => memory(n)));
+	const before = rows('SummaryNode');
+	const leaseLocks = () => lockCalls.filter((call) => call.table === 'SummaryState' && call.id === 'runner').length;
+	const locksAtCall = [];
+	modelState.onGenerate = () => void locksAtCall.push(leaseLocks());
+	modelState.generate = async () => ({ content: 'TITLE: Acme Walrus Notes', finishReason: 'stop' });
+	await write(memory(1, { content: 'changed 1', revision: 2 }));
+	await runner.tick();
+	assert.equal(locksAtCall.length, 2, 'one retry');
+	assert.ok(locksAtCall[1] > locksAtCall[0], 'the lease is renewed before the retry');
+	assert.deepEqual(rows('SummaryNode'), before, 'no placeholder is stored');
+	assert.ok(rows('SummaryChange').length > 0, 'the change waits for the next pass');
+
+	modelState.generate = undefined;
+	modelState.onGenerate = undefined;
+	await runner.tick();
+	const [node] = rows('SummaryNode');
+	assert.match(node.summary, /^Summary of \d+ chars\.$/);
+	assert.ok(node.builtFrom.some((ref) => ref.startsWith(`${memory(1).id}@2:`)));
+	assert.deepEqual(rows('SummaryChange'), []);
 });

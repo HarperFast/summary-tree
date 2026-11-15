@@ -33,6 +33,20 @@ models.registerBackend(
 	}),
 );
 
+// Generate calls since this process started, in total and per trigger word below; read through GET /GenerateCalls.
+const calls = { total: 0, okapi: 0, quagga: 0 };
+
+// A model that answers with only its title: the first time for okapi memories, the first two times for quagga ones.
+const TITLE_ONLY_CALLS = { okapi: 1, quagga: 2 };
+
+export class GenerateCalls extends Resource {
+	static loadAsInstance = false;
+
+	static get() {
+		return { ...calls };
+	}
+}
+
 // "Summarizes" by listing the most frequent words of the quoted items, so a summary reveals exactly which memories
 // it was built from.
 models.registerBackend(
@@ -48,6 +62,12 @@ models.registerBackend(
 				const literal = line.replace(/^\d+\.\s*/, '');
 				if (!literal.startsWith('"')) continue;
 				for (const token of new Set(tokens(JSON.parse(literal)))) counts.set(token, (counts.get(token) ?? 0) + 1);
+			}
+			calls.total++;
+			for (const [word, titleOnly] of Object.entries(TITLE_ONLY_CALLS)) {
+				if (counts.has(word) && ++calls[word] <= titleOnly) {
+					return { status: 'completed', output: { content: `TITLE: ${word} herd notes`, finishReason: 'stop' } };
+				}
 			}
 			// a model that ran into its token cap mid-sentence
 			if (counts.has('zebra')) {

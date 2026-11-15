@@ -145,3 +145,83 @@ test('gist: when the room is at the floor, the cut still lands on a word boundar
 	assert.equal(cut, `${'A'.repeat(55)}…`);
 	assert.equal(gist('word word word', 1, 60).length <= 1, true);
 });
+
+test('parseResponse: a TITLE line with nothing after it has no summary, whatever its length or markdown', () => {
+	for (const reply of [
+		'TITLE: Distributed Database Replication',
+		'**TITLE:** Distributed Database Replication\n\n',
+		'# TITLE: Distributed Database Replication\n\nSummary:',
+		`TITLE: ${'Internationalization '.repeat(6)}Considerations`,
+	]) {
+		assert.equal(parseResponse(reply).summary, '', reply);
+	}
+	assert.equal(parseResponse('**TITLE:** Vector Search').title, 'Vector Search');
+});
+
+test('parseResponse: a body that only repeats its title has no summary', () => {
+	assert.equal(parseResponse('TITLE: Vector Search\n\nVector search.').summary, '');
+	assert.equal(parseResponse('Vector Search\n\n**Vector Search**').summary, '');
+	assert.equal(parseResponse('TITLE: Vector Search\n\nSummary: vector SEARCH').summary, '');
+	assert.equal(
+		parseResponse('TITLE: Vector Search\n\nVector search uses HNSW indexes.').summary,
+		'Vector search uses HNSW indexes.',
+	);
+});
+
+test('parseResponse: one line of prose without a TITLE label is still the summary, however short', () => {
+	assert.deepEqual(parseResponse('Replicas converge after recovery.'), {
+		title: 'Replicas converge after recovery',
+		summary: 'Replicas converge after recovery.',
+	});
+});
+
+const opts = { model: 'm', maxTokens: 400, maxInputChars: 1000 };
+
+test('summarize: a reply with no summary is asked again once, then rejected', async () => {
+	let calls = 0;
+	const titleOnly = { generate: async () => (calls++, { content: 'TITLE: Acme Walrus Notes', finishReason: 'stop' }) };
+	await assert.rejects(summarize(titleOnly, ['x'], 2, opts), /empty summary/);
+	assert.equal(calls, 2);
+
+	const replies = ['TITLE: Acme Walrus Notes', 'TITLE: Acme Walrus Notes\n\nWalrus migrations run in spring.'];
+	const second = { generate: async () => ({ content: replies.shift() }) };
+	assert.deepEqual(await summarize(second, ['x'], 2, opts), {
+		title: 'Acme Walrus Notes',
+		summary: 'Walrus migrations run in spring.',
+	});
+	assert.equal(replies.length, 0);
+});
+
+test('summarize: beforeCall runs before every model call, and its failure or a model error ends it with no retry', async () => {
+	const events = [];
+	const models = {
+		async generate() {
+			events.push('generate');
+			return { content: 'TITLE: Only a title' };
+		},
+	};
+	await assert.rejects(
+		summarize(models, ['x'], 1, { ...opts, beforeCall: async () => void events.push('before') }),
+		/empty summary/,
+	);
+	assert.deepEqual(events, ['before', 'generate', 'before', 'generate']);
+
+	events.length = 0;
+	let allowed = 1;
+	const leaseLost = async () => {
+		events.push('before');
+		if (allowed-- <= 0) throw new Error('lease lost');
+	};
+	await assert.rejects(summarize(models, ['x'], 1, { ...opts, beforeCall: leaseLost }), /lease lost/);
+	assert.deepEqual(events, ['before', 'generate', 'before']);
+
+	let calls = 0;
+	const failing = {
+		async generate() {
+			calls++;
+			throw new Error('model unavailable');
+		},
+	};
+	await assert.rejects(summarize(failing, ['x'], 1, opts), /model unavailable/);
+	assert.equal(calls, 1);
+});

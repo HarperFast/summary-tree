@@ -1,6 +1,16 @@
 # Changelog
 
-## 0.2.1
+## 0.2.2
+
+- **Upgrades rewrite old summaries.** Every summary node records the summarizer version that wrote it. On startup,
+  each worker queues a rebuild of every label set that holds a node from an older version, or from before nodes were
+  stamped. That rebuild re-summarizes those nodes in place: their ids, topics and memory assignments stay the same.
+  Upgrading from 0.2.0 or 0.2.1 re-summarizes every stored node once, so summaries cut off mid-sentence and topics
+  whose summary only repeated their title get rewritten. Old text keeps being served until its replacement is
+  published.
+- **Title-only replies are rejected.** A model reply with a `TITLE:` line and nothing after it, or with a body that
+  only repeats the title, is no longer stored as the summary. The runner asks once more. If the second reply has no
+  summary either, the rebuild fails and is retried later, and the previous text stays.
 
 - **Orientation leaves room for recent memories.** The bootstrap `orientation` section fills at most half of the
   budget agent-memory passes it (new option `orientationShare`), so `recent` and `relevant` keep the rest. Before,

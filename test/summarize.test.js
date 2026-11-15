@@ -294,4 +294,8 @@ test('parseResponse: a TITLE line in the quotes the prompt shows it in is still 
 		title: 'Walruses migrate in spring',
 		summary: 'Walruses migrate in spring.',
 	});
+	assert.equal(
+		parseResponse('Summary: Walruses migrate in spring.\nThey return in autumn.').summary,
+		'Walruses migrate in spring.\nThey return in autumn.',
+	);
 });

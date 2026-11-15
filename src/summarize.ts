@@ -152,16 +152,18 @@ function leadingWords(text: string): string {
 export function parseResponse(text: string, truncated = false): { title: string; summary: string } {
 	const capped = (summary: string) =>
 		summary && (truncated || summary.length > MAX_SUMMARY_CHARS) ? trimToSentence(summary, MAX_SUMMARY_CHARS) : summary;
+	// a reply that opens with a Summary label has no title line
+	const titled = !SUMMARY_LABEL.test(text.trim());
 	const trimmed = text.trim().replace(SUMMARY_LABEL, '').trim();
 	const nl = trimmed.indexOf('\n');
 	const firstLine = (nl < 0 ? trimmed : trimmed.slice(0, nl)).trim();
 	const labeled = TITLE_LABEL.test(firstLine);
 	const titleLine = firstLine.replace(TITLE_LABEL, '').replace(TITLE_MARKUP, '').trim();
 	const body = capped((nl < 0 ? '' : trimmed.slice(nl + 1)).trim().replace(SUMMARY_LABEL, '').trim());
-	if ((labeled || nl >= 0) && (!words(body) || words(body) === words(titleLine))) {
+	if (titled && (labeled || nl >= 0) && (!words(body) || words(body) === words(titleLine))) {
 		return { title: titleLine.slice(0, MAX_TITLE_CHARS), summary: '' };
 	}
-	if (body && titleLine.length <= MAX_TITLE_CHARS) {
+	if (titled && body && titleLine.length <= MAX_TITLE_CHARS) {
 		return { title: words(titleLine) ? titleLine : leadingWords(body), summary: body };
 	}
 	// the model skipped the title line and went straight to prose

@@ -120,7 +120,7 @@ export function buildPrompt(texts: readonly string[], level: number, maxInputCha
 	};
 }
 
-const TITLE_LABEL = /^[#*_\s]*TITLE[*_]*\s*:[*_]*\s*/i;
+const TITLE_LABEL = /^[#*_"'\s]*TITLE[*_]*\s*:[*_]*\s*/i;
 const SUMMARY_LABEL = /^[#*_\s]*Summary[*_]*\s*:[*_]*\s*/i;
 
 /** Letters and digits only, so markdown, punctuation and case do not make a repeated title look new. */
@@ -152,7 +152,7 @@ function leadingWords(text: string): string {
 export function parseResponse(text: string, truncated = false): { title: string; summary: string } {
 	const capped = (summary: string) =>
 		summary && (truncated || summary.length > MAX_SUMMARY_CHARS) ? trimToSentence(summary, MAX_SUMMARY_CHARS) : summary;
-	const trimmed = text.trim();
+	const trimmed = text.trim().replace(SUMMARY_LABEL, '').trim();
 	const nl = trimmed.indexOf('\n');
 	const firstLine = (nl < 0 ? trimmed : trimmed.slice(0, nl)).trim();
 	const labeled = TITLE_LABEL.test(firstLine);
@@ -165,7 +165,7 @@ export function parseResponse(text: string, truncated = false): { title: string;
 		return { title: words(titleLine) ? titleLine : leadingWords(body), summary: body };
 	}
 	// the model skipped the title line and went straight to prose
-	const summary = capped(trimmed.replace(TITLE_LABEL, '').replace(SUMMARY_LABEL, '').trim());
+	const summary = capped(trimmed.replace(TITLE_LABEL, ''));
 	// trimming can leave only the title line
 	if (!words(summary) || (labeled && words(summary) === words(titleLine))) return { title: '', summary: '' };
 	return { title: leadingWords(summary), summary };

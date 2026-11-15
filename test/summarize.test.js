@@ -283,3 +283,15 @@ test('parseResponse: a reply that is only a Summary label has no summary; derive
 	assert.equal(parseResponse('# Vector Search\n\nHNSW indexes power similarity search.').title, 'Vector Search');
 	assert.equal(parseResponse('**Replicas converge after recovery**.').title, 'Replicas converge after recovery');
 });
+
+test('parseResponse: a TITLE line in the quotes the prompt shows it in is still a title; a leading Summary line is not one', () => {
+	assert.equal(parseResponse('"TITLE: Acme Walrus Notes"').summary, '');
+	assert.deepEqual(parseResponse('"TITLE: Acme Walrus Notes"\n\nWalruses migrate in spring.'), {
+		title: 'Acme Walrus Notes',
+		summary: 'Walruses migrate in spring.',
+	});
+	assert.deepEqual(parseResponse('Summary:\nWalruses migrate in spring.'), {
+		title: 'Walruses migrate in spring',
+		summary: 'Walruses migrate in spring.',
+	});
+});
